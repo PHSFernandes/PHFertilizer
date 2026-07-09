@@ -1,0 +1,5 @@
+Ingrediente,Preco_ton,MO_ms_pct,Umidade_pct,N_pct,P2O5_pct,K2O_pct,Min_kg,Max_kg
+Composto orgânico,180,45,30,1.2,0.8,1.0,0,5000
+Uréia,2900,0,0,46,0,0,0,1000
+DAP,3400,0,0,18,46,0,0,1000
+Sulfato de potássio,4100,0,0,0,0,50,0,1000
