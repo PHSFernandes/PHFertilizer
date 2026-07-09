@@ -11,6 +11,7 @@ st.markdown(
 Este app calcula a quantidade ideal de cada ingrediente para atingir metas de **Carbono, N, P₂O₅ e K₂O**
 com **menor custo**, usando programação linear. O carbono do composto orgânico é calculado como **58% da matéria orgânica**,
 considerando que a matéria orgânica foi informada em **base seca** e corrigida pela umidade.
+A tolerância é interpretada como **relativa à meta**. Ex.: meta de 10% com tolerância de 10% gera faixa aceitável de 9% a 11%.
 """
 )
 
@@ -20,7 +21,8 @@ st.markdown(
 - Para ingredientes orgânicos, preencha `MO_ms_pct` e `Umidade_pct`; o app calcula `C_pct_efetivo = 0.58 × MO_ms_pct × (1 - Umidade/100)`.
 - Para fontes minerais, preencha diretamente `N_pct`, `P2O5_pct` e `K2O_pct`.
 - `Min_kg` e `Max_kg` são opcionais; se `Max_kg` ficar vazio, o app considera um limite alto.
-- A massa final **não é fixa**; o modelo encontra a mistura mais barata que satisfaça as metas mínimas dentro da tolerância.
+- A massa final **não é fixa**; o modelo encontra a mistura mais barata que satisfaça as metas dentro da tolerância relativa informada.
+- Exemplo: meta 10 e tolerância 10% = faixa de 9 a 11; meta 8 e tolerância 10% = faixa de 7,2 a 8,8.
 """
 )
 
@@ -61,7 +63,7 @@ with col3:
 with col4:
     meta_k = st.number_input("K₂O alvo (%)", min_value=0.0, value=10.0, step=0.1)
 with col5:
-    tolerancia = st.number_input("Tolerância (%)", min_value=0.0, value=0.0, step=0.1)
+    tolerancia = st.number_input("Tolerância relativa (%)", min_value=0.0, value=0.0, step=0.1)
 
 base_minima = st.number_input("Massa mínima total da mistura (kg)", min_value=1.0, value=1000.0, step=100.0)
 
@@ -98,8 +100,9 @@ def resolver(data, metas, tol, massa_min):
     }
 
     for col, alvo in nutrientes.items():
-        minimo = max(0.0, alvo - tol)
-        maximo = alvo + tol
+        fator_tol = tol / 100.0
+        minimo = max(0.0, alvo * (1 - fator_tol))
+        maximo = alvo * (1 + fator_tol)
         contrib = lpSum(x[i] * float(data.loc[i, col]) / 100.0 for i in data.index)
         prob += contrib >= (minimo / 100.0) * total
         prob += contrib <= (maximo / 100.0) * total
@@ -140,7 +143,7 @@ if st.button("Calcular mistura ótima", type="primary"):
     if resumo is None:
         st.error(status_msg)
     else:
-        st.success("Solução ótima encontrada.")
+        st.success("Solução ótima encontrada dentro da tolerância relativa informada.")
         st.subheader("Resumo")
         st.dataframe(resumo, use_container_width=True, hide_index=True)
 
