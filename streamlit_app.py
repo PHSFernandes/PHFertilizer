@@ -1,4 +1,3 @@
-import io
 import requests
 from itertools import combinations
 from urllib.parse import quote
@@ -397,6 +396,21 @@ def resumo_nutrientes_completo(df_resultado: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------
+# Estado de sessão (incompatibilidades)
+# --------------------------------------------------------
+
+if "incomp_choices_sistema" not in st.session_state:
+    st.session_state.incomp_choices_sistema = {}
+if "incomp_resolvido_sistema" not in st.session_state:
+    st.session_state.incomp_resolvido_sistema = False
+
+if "incomp_choices_usuario" not in st.session_state:
+    st.session_state.incomp_choices_usuario = {}
+if "incomp_resolvido_usuario" not in st.session_state:
+    st.session_state.incomp_resolvido_usuario = False
+
+
+# --------------------------------------------------------
 # Interface principal
 # --------------------------------------------------------
 
@@ -510,17 +524,17 @@ with tab_sistema:
         hide_index=True,
     )
 
-    if st.button("Calcular mistura (Sistema)", type="primary"):
-        # 1) Resolver incompatibilidades pela sua escolha
+    btn_sistema = st.button("Calcular mistura (Sistema)", type="primary")
+
+    if btn_sistema or st.session_state.incomp_resolvido_sistema:
+        # 1) Resolver incompatibilidades (se ainda não resolvidas)
         selecionados = ativos_sistema["Ingrediente"].tolist()
         incompat, limitados = classificar_compatibilidade(selecionados, df_compat)
 
-        ingredientes_para_remover = set()
-
-        if incompat:
+        if incompat and not st.session_state.incomp_resolvido_sistema:
             st.warning(
                 "Foram encontradas combinações INCOMPATÍVEIS. "
-                "Escolha qual ingrediente remover em cada par."
+                "Escolha qual ingrediente remover em cada par e depois clique em 'Aplicar remoções'."
             )
 
             for idx, (a, b) in enumerate(incompat):
@@ -530,9 +544,7 @@ with tab_sistema:
                     [f"Remover {a}", f"Remover {b}", "Não remover nenhum"],
                     key=f"conf_incomp_sistema_{idx}",
                 )
-                if escolha.startswith("Remover"):
-                    nome = escolha.replace("Remover ", "")
-                    ingredientes_para_remover.add(nome)
+                st.session_state.incomp_choices_sistema[(a, b)] = escolha
 
             aplicar_remocoes = st.button(
                 "Aplicar remoções de incompatibilidade (Sistema)",
@@ -540,7 +552,13 @@ with tab_sistema:
             )
 
             if aplicar_remocoes:
-                if len(ingredientes_para_remover) == 0 and len(incompat) > 0:
+                removidos = set()
+                for (a, b), esc in st.session_state.incomp_choices_sistema.items():
+                    if esc.startswith("Remover"):
+                        nome = esc.replace("Remover ", "")
+                        removidos.add(nome)
+
+                if len(removidos) == 0 and len(incompat) > 0:
                     st.error(
                         "Nenhum ingrediente foi marcado para remoção, "
                         "mas há pares INCOMPATÍVEIS. Remova pelo menos um ingrediente por par para prosseguir."
@@ -548,7 +566,7 @@ with tab_sistema:
                     st.stop()
 
                 ativos_sistema = ativos_sistema[
-                    ~ativos_sistema["Ingrediente"].isin(ingredientes_para_remover)
+                    ~ativos_sistema["Ingrediente"].isin(removidos)
                 ].copy()
 
                 selecionados_filtrados = ativos_sistema["Ingrediente"].tolist()
@@ -562,9 +580,25 @@ with tab_sistema:
                     )
                     st.stop()
 
+                st.session_state.incomp_resolvido_sistema = True
                 limitados = limitados2
+
             else:
                 st.stop()
+        else:
+            # Já resolvido ou sem incompatível
+            if st.session_state.incomp_resolvido_sistema:
+                selecionados_filtrados = ativos_sistema["Ingrediente"].tolist()
+                incompat2, limitados2 = classificar_compatibilidade(
+                    selecionados_filtrados, df_compat
+                )
+                if incompat2:
+                    txt2 = "; ".join([f"{a} × {b}" for a, b in incompat2])
+                    st.error(
+                        f"Ainda há combinações INCOMPATÍVEIS após remoção: {txt2}"
+                    )
+                    st.stop()
+                limitados = limitados2
 
         # 2) Tratar LIMITADO com confirmação
         if limitados:
@@ -775,16 +809,18 @@ with tab_usuario:
         hide_index=True,
     )
 
-    if st.button("Calcular mistura (Usuário)", type="primary"):
+    btn_usuario = st.button("Calcular mistura (Usuário)", type="primary")
+
+    if btn_usuario or st.session_state.incomp_resolvido_usuario:
         selecionados_u = ativos_usuario["Ingrediente"].tolist()
-        incompat_u, limitados_u = classificar_compatibilidade(selecionados_u, df_compat)
+        incompat_u, limitados_u = classificar_compatibilidade(
+            selecionados_u, df_compat
+        )
 
-        ingredientes_para_remover_u = set()
-
-        if incompat_u:
+        if incompat_u and not st.session_state.incomp_resolvido_usuario:
             st.warning(
                 "Foram encontradas combinações INCOMPATÍVEIS no estoque. "
-                "Escolha qual ingrediente remover em cada par."
+                "Escolha qual ingrediente remover em cada par e depois clique em 'Aplicar remoções'."
             )
 
             for idx, (a, b) in enumerate(incompat_u):
@@ -794,9 +830,7 @@ with tab_usuario:
                     [f"Remover {a}", f"Remover {b}", "Não remover nenhum"],
                     key=f"conf_incomp_usuario_{idx}",
                 )
-                if escolha_u.startswith("Remover"):
-                    nome_u = escolha_u.replace("Remover ", "")
-                    ingredientes_para_remover_u.add(nome_u)
+                st.session_state.incomp_choices_usuario[(a, b)] = escolha_u
 
             aplicar_remocoes_u = st.button(
                 "Aplicar remoções de incompatibilidade (Usuário)",
@@ -804,7 +838,13 @@ with tab_usuario:
             )
 
             if aplicar_remocoes_u:
-                if len(ingredientes_para_remover_u) == 0 and len(incompat_u) > 0:
+                removidos_u = set()
+                for (a, b), esc_u in st.session_state.incomp_choices_usuario.items():
+                    if esc_u.startswith("Remover"):
+                        nome_u = esc_u.replace("Remover ", "")
+                        removidos_u.add(nome_u)
+
+                if len(removidos_u) == 0 and len(incompat_u) > 0:
                     st.error(
                         "Nenhum ingrediente foi marcado para remoção, "
                         "mas há pares INCOMPATÍVEIS. Remova pelo menos um ingrediente por par para prosseguir."
@@ -812,7 +852,7 @@ with tab_usuario:
                     st.stop()
 
                 ativos_usuario = ativos_usuario[
-                    ~ativos_usuario["Ingrediente"].isin(ingredientes_para_remover_u)
+                    ~ativos_usuario["Ingrediente"].isin(removidos_u)
                 ].copy()
 
                 selecionados_filtrados_u = ativos_usuario["Ingrediente"].tolist()
@@ -826,9 +866,24 @@ with tab_usuario:
                     )
                     st.stop()
 
+                st.session_state.incomp_resolvido_usuario = True
                 limitados_u = limitados2_u
+
             else:
                 st.stop()
+        else:
+            if st.session_state.incomp_resolvido_usuario:
+                selecionados_filtrados_u = ativos_usuario["Ingrediente"].tolist()
+                incompat2_u, limitados2_u = classificar_compatibilidade(
+                    selecionados_filtrados_u, df_compat
+                )
+                if incompat2_u:
+                    txt2_u = "; ".join([f"{a} × {b}" for a, b in incompat2_u])
+                    st.error(
+                        f"Ainda há combinações INCOMPATÍVEIS após remoção: {txt2_u}"
+                    )
+                    st.stop()
+                limitados_u = limitados2_u
 
         if limitados_u:
             txt_lim_u = "; ".join([f"{a} × {b}" for a, b in limitados_u])
