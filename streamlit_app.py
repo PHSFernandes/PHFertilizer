@@ -258,7 +258,7 @@ def obter_cotacao_usd_brl_api() -> float | None:
 
 
 # --------------------------------------------------------
-# Otimizador (PuLP) e Seleção de Inerte
+# Otimizador (PuLP) com Variáveis de Folga (Diagnóstico Slacks)
 # --------------------------------------------------------
 
 
@@ -271,8 +271,7 @@ def resolver_base_ativa(
     usar_bioclastico: bool,
     pct_bioclastico: float
 ):
-    # 2º Filtro: Considerar matérias-primas que efetivamente contribuem com N, P2O5, K2O ou Carbono
-    # (Adicionalmente mantém Bioclástico se ativado)
+    # Considerar matérias-primas que contribuem com N, P2O5, K2O, Carbono ou Bioclástico
     mask_contribuintes = (
         (ativos["N_pct"] > 0) |
         (ativos["P2O5_pct"] > 0) |
@@ -283,7 +282,7 @@ def resolver_base_ativa(
     ativos = ativos[mask_contribuintes].copy()
 
     if ativos.empty:
-        return None, "Nenhuma matéria-prima disponível possui teor nutricional para suprir N, P₂O₅, K₂O ou Carbono.", None
+        return None, "Nenhuma matéria-prima disponível no momento possui teor para suprir N, P₂O₅, K₂O ou Carbono.", None
 
     metas_todas = metas_principais.copy()
     metas_todas.update(metas_extra)
@@ -292,15 +291,26 @@ def resolver_base_ativa(
     
     x = {}
     for i, row in ativos.iterrows():
-        # Trava a massa do Bioclástico de acordo com a % informada
         if usar_bioclastico and row["Ingrediente"] == "Bioclástico":
             massa_bio = (pct_bioclastico / 100.0) * massa_final
             x[i] = LpVariable(f"x_{i}", lowBound=massa_bio, upBound=massa_bio)
         else:
             x[i] = LpVariable(f"x_{i}", lowBound=0.0)
 
+    # Variáveis de folga (Slacks) para diagnóstico de inviabilidade por nutriente
+    slack_nutrientes = {
+        col: LpVariable(f"slack_{col}", lowBound=0.0)
+        for col, alvo in metas_todas.items() if alvo > 0
+    }
+
+    # Função Objetivo: Custo Real das Matérias-Primas + Penalidade Altíssima para Slacks de Nutrientes
+    PENALIDADE_SLACK = 1e6
+    prob += (
+        lpSum(x[i] * float(ativos.loc[i, "Preco_ton"]) / 1000.0 for i in ativos.index) +
+        lpSum(slack_nutrientes[col] * PENALIDADE_SLACK for col in slack_nutrientes)
+    )
+
     total_ativos = lpSum(x[i] for i in ativos.index)
-    prob += lpSum(x[i] * float(ativos.loc[i, "Preco_ton"]) / 1000.0 for i in ativos.index)
     prob += total_ativos <= massa_final
 
     for col, alvo in metas_todas.items():
@@ -311,7 +321,8 @@ def resolver_base_ativa(
         minimo = max(0.0, alvo * (1 - fator_tol))
         contrib = lpSum(x[i] * float(ativos.loc[i, col]) / 100.0 for i in ativos.index)
         
-        prob += contrib >= (minimo / 100.0) * massa_final
+        # O slack absorve qualquer déficit físico impossível de atender
+        prob += contrib + (slack_nutrientes[col] / 100.0) * massa_final >= (minimo / 100.0) * massa_final
         
         if tol > 0:
             maximo = alvo * (1 + fator_tol)
@@ -319,14 +330,28 @@ def resolver_base_ativa(
 
     prob.solve(PULP_CBC_CMD(msg=False))
     status = LpStatus[prob.status]
-    
-    if status != "Optimal":
-        msg = (
-            f"Modelo sem solução ótima (Status: {status}). "
-            "As matérias-primas disponíveis que fornecem NPK+C não conseguem atingir a garantia dentro do limite da massa final. "
-            "Verifique a tolerância relativa (%), o estoque selecionado ou o percentual de Bioclástico informado."
+
+    # Checar se houve ativação de Slacks (Déficit Nutricional por Falta de Espaço/Concentração)
+    deficits = {}
+    for col, var in slack_nutrientes.items():
+        v = value(var)
+        if v is not None and v > 1e-4:
+            deficits[ROTULOS.get(col, col)] = round(v, 2)
+
+    if deficits:
+        msg_diag = (
+            "⚠️ **Diagnóstico Técnico de Viabilidade**: As matérias-primas selecionadas são pouco concentradas "
+            "ou a fração de Carbono/Bioclástico ocupa muito espaço físico. Não foi possível atingir o teor desejado em 1000 kg.\n\n"
+            "**Déficit identificado em relação ao piso mínimo exigido:**\n"
         )
-        return None, msg, None
+        for nut, d_val in deficits.items():
+            msg_diag += f"- **{nut}**: Falta incorporar mais **{d_val}%** na mistura final.\n"
+        
+        msg_diag += "\n*Sugestões do Sistema:* Aumente a Tolerância Relativa (%), reduza o % de Bioclástico ou selecione matérias-primas mais concentradas."
+        return None, msg_diag, None
+
+    if status != "Optimal":
+        return None, f"Modelo de otimização sem solução. Status do solver: {status}", None
 
     sol = ativos.copy()
     sol["Quantidade_kg"] = [value(x[i]) for i in ativos.index]
@@ -643,7 +668,7 @@ with tab_sistema:
         )
 
         if sol_ativos is None:
-            st.error(status_msg)
+            st.warning(status_msg)
             st.session_state.calc_results["sistema"] = None
         else:
             inerte_escolhido, alerta_inerte, _, lim_inertes = escolher_inerte(sol_ativos, df_mat, df_compat, massa_final)
@@ -762,7 +787,7 @@ with tab_usuario:
         )
 
         if sol_ativos_u is None:
-            st.error(status_msg_u)
+            st.warning(status_msg_u)
             st.session_state.calc_results["usuario"] = None
         else:
             inerte_u, _, _, lim_inertes_u = escolher_inerte(sol_ativos_u, df_mat, df_compat, massa_final)
