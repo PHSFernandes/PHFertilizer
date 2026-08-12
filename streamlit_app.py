@@ -303,7 +303,7 @@ def resolver_base_ativa(
         for col, alvo in metas_todas.items() if alvo > 0
     }
 
-    # Função Objetivo: Custo Real das Matérias-Primas + Penalidade Altíssima para Slacks de Nutrientes
+    # Função Objetivo: Custo Real das Matérias-Primas + Penalidade Altíssima para Slacks
     PENALIDADE_SLACK = 1e6
     prob += (
         lpSum(x[i] * float(ativos.loc[i, "Preco_ton"]) / 1000.0 for i in ativos.index) +
@@ -321,7 +321,6 @@ def resolver_base_ativa(
         minimo = max(0.0, alvo * (1 - fator_tol))
         contrib = lpSum(x[i] * float(ativos.loc[i, col]) / 100.0 for i in ativos.index)
         
-        # O slack absorve qualquer déficit físico impossível de atender
         prob += contrib + (slack_nutrientes[col] / 100.0) * massa_final >= (minimo / 100.0) * massa_final
         
         if tol > 0:
@@ -540,21 +539,20 @@ if "removidos" not in st.session_state:
 
 
 # --------------------------------------------------------
-# Interface Principal do Streamlit
+# Interface Principal e Barra Lateral
 # --------------------------------------------------------
 
 st.title("Otimizador de Misturas NPK + Carbono")
 st.markdown("**INNOVATERRA AGRISOLUTIONS**")
 
-try:
-    df_insumos = carregar_insumos()
-    df_mat = carregar_mat_primas()
-    df_compat = carregar_compatibilidade()
-except Exception as e:
-    st.error(f"Falha ao carregar as planilhas do Google Sheets: {e}")
-    st.stop()
-
+# Barra Lateral (Sidebar)
 st.sidebar.header("INNOVATERRA AGRISOLUTIONS")
+
+# Opção 1: Botão para limpar cache e atualizar dados do Google Sheets em tempo real
+if st.sidebar.button("🔄 Recarregar Dados das Planilhas"):
+    st.cache_data.clear()
+    st.rerun()
+
 st.sidebar.subheader("Cotação do Dólar (USD/BRL)")
 
 cotacao_api = obter_cotacao_usd_brl_api()
@@ -570,6 +568,14 @@ else:
         step=0.01,
     )
     cotacao_efetiva = cotacao_manual
+
+try:
+    df_insumos = carregar_insumos()
+    df_mat = carregar_mat_primas()
+    df_compat = carregar_compatibilidade()
+except Exception as e:
+    st.error(f"Falha ao carregar as planilhas do Google Sheets: {e}")
+    st.stop()
 
 st.subheader("Metas da Mistura Final")
 
