@@ -22,12 +22,12 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 # --------------------------------------------------------
-# Configuração básica
+# Configuração básica da página
 # --------------------------------------------------------
 
 st.set_page_config(page_title="Otimizador de Misturas NPK+C", layout="wide")
 
-# IDs das planilhas
+# IDs das planilhas Google Sheets
 INSUMOS_SHEET_ID = "1rUIG49XF9eszt-4c_iS45bNLMEFlgpokVDG-qwFOF1k"
 MAT_PRIMAS_SHEET_ID = "112DvPDCPnzkfIlexxtwQIbOUf5Pm6WlznEUhz7K_9_E"
 COMPAT_SHEET_ID = "1D1VxuaaviKd73ccyn8ltWEnvlss2e0mK_K5j7zBo8zQ"
@@ -81,7 +81,7 @@ def gs_csv_url(sheet_id: str, sheet_name: str) -> str:
 
 
 # --------------------------------------------------------
-# Carregamento dos dados
+# Carregamento dos dados via Google Sheets
 # --------------------------------------------------------
 
 
@@ -126,9 +126,7 @@ def carregar_insumos() -> pd.DataFrame:
         .str.replace(".", "", regex=False)
         .str.replace(",", ".", regex=False)
     )
-    df["Preco_usd_ton"] = pd.to_numeric(df["Preco_usd_ton"], errors="coerce").fillna(
-        0.0
-    )
+    df["Preco_usd_ton"] = pd.to_numeric(df["Preco_usd_ton"], errors="coerce").fillna(0.0)
 
     df["Insumo"] = df["Insumo"].astype(str).str.strip()
     df = df[df["Insumo"] != ""].copy()
@@ -162,8 +160,6 @@ def carregar_mat_primas() -> pd.DataFrame:
         "Mo_pct",
         "Ni_pct",
         "Zn_pct",
-        "Min_kg",
-        "Max_kg",
         "Tipo_funcao",
     ]
     for col in expected_cols:
@@ -184,12 +180,12 @@ def carregar_mat_primas() -> pd.DataFrame:
     df["Tipo_funcao"] = df["Tipo_funcao"].astype(str).str.strip().str.upper()
     df = df[df["Ingrediente"] != ""].copy()
 
+    # Cálculo do Carbono derivado da Matéria Orgânica caso C_pct esteja zerado
     mask_c_zero = df["C_pct"].fillna(0).eq(0) & df["MO_ms_pct"].gt(0)
     df.loc[mask_c_zero, "C_pct"] = 0.58 * df.loc[mask_c_zero, "MO_ms_pct"] * (
         1 - df.loc[mask_c_zero, "Umidade_pct"] / 100.0
     )
 
-    df["Max_kg"] = df["Max_kg"].replace(0, 1e9)
     return df
 
 
@@ -217,7 +213,7 @@ def carregar_compatibilidade() -> pd.DataFrame:
 
 
 # --------------------------------------------------------
-# Compatibilidade e câmbio
+# Lógica de Compatibilidade e Câmbio
 # --------------------------------------------------------
 
 
@@ -252,7 +248,6 @@ def classificar_compatibilidade(selecionados: list[str], matriz: pd.DataFrame):
 
 def obter_cotacao_usd_brl_api() -> float | None:
     try:
-        # endpoint alternativo público resiliente (AwesomeAPI)
         resp = requests.get("https://economia.awesomeapi.com.br/last/USD-BRL", timeout=5)
         if resp.status_code == 200:
             data = resp.json()
@@ -263,7 +258,7 @@ def obter_cotacao_usd_brl_api() -> float | None:
 
 
 # --------------------------------------------------------
-# Solver e composição
+# Otimizador (PuLP) e Seleção de Inerte
 # --------------------------------------------------------
 
 
@@ -273,22 +268,36 @@ def resolver_base_ativa(
     metas_extra: dict,
     tol: float,
     massa_final: float,
+    usar_bioclastico: bool,
+    pct_bioclastico: float
 ):
+    # 2º Filtro: Considerar matérias-primas que efetivamente contribuem com N, P2O5, K2O ou Carbono
+    # (Adicionalmente mantém Bioclástico se ativado)
+    mask_contribuintes = (
+        (ativos["N_pct"] > 0) |
+        (ativos["P2O5_pct"] > 0) |
+        (ativos["K2O_pct"] > 0) |
+        (ativos["C_pct"] > 0) |
+        (ativos["Ingrediente"] == "Bioclástico")
+    )
+    ativos = ativos[mask_contribuintes].copy()
+
     if ativos.empty:
-        return None, "Nenhum ingrediente ativo elegível.", None
+        return None, "Nenhuma matéria-prima disponível possui teor nutricional para suprir N, P₂O₅, K₂O ou Carbono.", None
 
     metas_todas = metas_principais.copy()
     metas_todas.update(metas_extra)
 
     prob = LpProblem("Mistura_NPK_C_Ativos", LpMinimize)
-    x = {
-        i: LpVariable(
-            f"x_{i}",
-            lowBound=max(0.0, float(ativos.loc[i, "Min_kg"])),
-            upBound=float(ativos.loc[i, "Max_kg"]),
-        )
-        for i in ativos.index
-    }
+    
+    x = {}
+    for i, row in ativos.iterrows():
+        # Trava a massa do Bioclástico de acordo com a % informada
+        if usar_bioclastico and row["Ingrediente"] == "Bioclástico":
+            massa_bio = (pct_bioclastico / 100.0) * massa_final
+            x[i] = LpVariable(f"x_{i}", lowBound=massa_bio, upBound=massa_bio)
+        else:
+            x[i] = LpVariable(f"x_{i}", lowBound=0.0)
 
     total_ativos = lpSum(x[i] for i in ativos.index)
     prob += lpSum(x[i] * float(ativos.loc[i, "Preco_ton"]) / 1000.0 for i in ativos.index)
@@ -297,17 +306,27 @@ def resolver_base_ativa(
     for col, alvo in metas_todas.items():
         if alvo <= 0:
             continue
+        
         fator_tol = tol / 100.0
         minimo = max(0.0, alvo * (1 - fator_tol))
-        maximo = alvo * (1 + fator_tol)
         contrib = lpSum(x[i] * float(ativos.loc[i, col]) / 100.0 for i in ativos.index)
+        
         prob += contrib >= (minimo / 100.0) * massa_final
-        prob += contrib <= (maximo / 100.0) * massa_final
+        
+        if tol > 0:
+            maximo = alvo * (1 + fator_tol)
+            prob += contrib <= (maximo / 100.0) * massa_final
 
     prob.solve(PULP_CBC_CMD(msg=False))
     status = LpStatus[prob.status]
+    
     if status != "Optimal":
-        return None, f"Modelo sem solução ótima. Status: {status}", None
+        msg = (
+            f"Modelo sem solução ótima (Status: {status}). "
+            "As matérias-primas disponíveis que fornecem NPK+C não conseguem atingir a garantia dentro do limite da massa final. "
+            "Verifique a tolerância relativa (%), o estoque selecionado ou o percentual de Bioclástico informado."
+        )
+        return None, msg, None
 
     sol = ativos.copy()
     sol["Quantidade_kg"] = [value(x[i]) for i in ativos.index]
@@ -397,10 +416,15 @@ def resumo_nutrientes_completo(df_resultado: pd.DataFrame) -> pd.DataFrame:
             linhas.append(
                 {
                     "Nutriente": ROTULOS.get(col, col),
-                    "Teor final (%)": teor_final,
+                    "Teor final (%)": round(teor_final, 2),
                 }
             )
     return pd.DataFrame(linhas)
+
+
+# --------------------------------------------------------
+# Exportação PDF (ReportLab - A4 Paisagem)
+# --------------------------------------------------------
 
 
 def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.DataFrame, df_nutrientes: pd.DataFrame) -> bytes:
@@ -420,24 +444,23 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
         fontSize=18,
         textColor=colors.HexColor('#1b4332'),
         alignment=1,
-        spaceAfter=15
+        spaceAfter=10
     )
     subtitle_style = ParagraphStyle(
         'DocSubTitle',
         parent=styles['Heading2'],
         fontSize=12,
         textColor=colors.HexColor('#2d6a4f'),
-        spaceBefore=10,
-        spaceAfter=5
+        spaceBefore=8,
+        spaceAfter=4
     )
 
     story = []
     story.append(Paragraph("INNOVATERRA AGRISOLUTIONS", title_style))
-    story.append(Paragraph("Relatório de Formulação de Fertilizante Organomineral", styles['Heading3']))
+    story.append(Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Heading3']))
     story.append(Spacer(1, 10))
 
-    # Tabela de Ingredientes
-    story.append(Paragraph("Ingredientes Selecionados", subtitle_style))
+    story.append(Paragraph("Composição das Matérias-Primas", subtitle_style))
     data_ing = [df_ingredientes.columns.tolist()] + df_ingredientes.values.tolist()
     t_ing = Table(data_ing)
     t_ing.setStyle(TableStyle([
@@ -446,13 +469,12 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 5),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
     ]))
     story.append(t_ing)
-    story.append(Spacer(1, 15))
+    story.append(Spacer(1, 12))
 
-    # Resumo Econômico e Nutricional lado a lado
     story.append(Paragraph("Resumo Econômico & Composição Nutricional Final", subtitle_style))
     
     data_econ = [df_resumo_econ.columns.tolist()] + df_resumo_econ.values.tolist()
@@ -482,7 +504,7 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
 
 
 # --------------------------------------------------------
-# Estado da sessão
+# Inicialização do Estado de Sessão
 # --------------------------------------------------------
 
 if "calc_results" not in st.session_state:
@@ -493,7 +515,7 @@ if "removidos" not in st.session_state:
 
 
 # --------------------------------------------------------
-# Interface principal
+# Interface Principal do Streamlit
 # --------------------------------------------------------
 
 st.title("Otimizador de Misturas NPK + Carbono")
@@ -504,18 +526,18 @@ try:
     df_mat = carregar_mat_primas()
     df_compat = carregar_compatibilidade()
 except Exception as e:
-    st.error(f"Falha ao ler dados do Google Sheets: {e}")
+    st.error(f"Falha ao carregar as planilhas do Google Sheets: {e}")
     st.stop()
 
 st.sidebar.header("INNOVATERRA AGRISOLUTIONS")
-st.sidebar.subheader("Cotação do dólar (USD/BRL)")
+st.sidebar.subheader("Cotação do Dólar (USD/BRL)")
 
 cotacao_api = obter_cotacao_usd_brl_api()
 if cotacao_api is not None:
-    st.sidebar.metric("Cotação automática", f"{cotacao_api:.4f}")
+    st.sidebar.metric("Cotação automática", f"R$ {cotacao_api:.4f}")
     cotacao_efetiva = cotacao_api
 else:
-    st.sidebar.warning("Não foi possível obter a cotação automática. Informe manualmente.")
+    st.sidebar.warning("Cotação automática indisponível. Informe manualmente.")
     cotacao_manual = st.sidebar.number_input(
         "Cotação manual (R$/US$)",
         min_value=0.0,
@@ -524,7 +546,7 @@ else:
     )
     cotacao_efetiva = cotacao_manual
 
-st.subheader("Metas da mistura final")
+st.subheader("Metas da Mistura Final")
 
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
@@ -536,9 +558,9 @@ with col3:
 with col4:
     meta_k = st.number_input("K₂O alvo (%)", min_value=0.0, value=10.0, step=0.1)
 with col5:
-    tolerancia = st.number_input("Tolerância relativa (%)", min_value=0.0, value=0.0, step=0.1)
+    tolerancia = st.number_input("Tolerância relativa (%)", min_value=0.0, value=5.0, step=0.1)
 
-st.markdown("**Outros macro e micronutrientes (metas opcionais, % m/m)**")
+st.markdown("**Outros Macro e Micronutrientes (Metas opcionais, % m/m)**")
 
 meta_adicionais = {}
 cols_meta_extra = st.columns(4)
@@ -555,57 +577,74 @@ massa_final = st.number_input(
     "Massa final desejada (kg)", min_value=1.0, value=1000.0, step=100.0
 )
 
-tab_sistema, tab_usuario = st.tabs(["Sugestão do sistema", "Sugestão do usuário"])
+tab_sistema, tab_usuario = st.tabs(["Sugestão do Sistema", "Sugestão do Usuário"])
 
 # --------------------------------------------------------
-# Fluxo da aba Sugestão do sistema
+# Aba: Sugestão do Sistema
 # --------------------------------------------------------
 
 with tab_sistema:
-    st.subheader("Sugestão do sistema")
+    st.subheader("Sugestão do Sistema")
 
-    permitir_bioclastico_sistema = st.radio(
-        "Permitir Bioclástico?",
-        ["Não", "Sim"],
-        key="bio_sistema",
-        horizontal=True,
-    )
+    col_bio1, col_bio2 = st.columns([1, 2])
+    with col_bio1:
+        permitir_bioclastico_sistema = st.radio(
+            "Permitir Bioclástico?",
+            ["Não", "Sim"],
+            key="bio_sistema",
+            horizontal=True,
+        )
+    with col_bio2:
+        pct_bioclastico_s = 0.0
+        if permitir_bioclastico_sistema == "Sim":
+            pct_bioclastico_s = st.number_input(
+                "Percentual de Bioclástico a adicionar (%)",
+                min_value=0.1,
+                max_value=100.0,
+                value=5.0,
+                step=0.5,
+                key="pct_bio_s"
+            )
 
     ativos_sistema = df_mat[df_mat["Tipo_funcao"] != "INERTE"].copy()
     if permitir_bioclastico_sistema == "Não":
         ativos_sistema = ativos_sistema[ativos_sistema["Ingrediente"] != "Bioclástico"].copy()
 
-    # Aplicação de remoções manuais salvas no estado
     if st.session_state.removidos["sistema"]:
         ativos_sistema = ativos_sistema[~ativos_sistema["Ingrediente"].isin(st.session_state.removidos["sistema"])].copy()
 
-    st.markdown("### Ingredientes disponíveis (Sistema)")
+    st.markdown("### Ingredientes Disponíveis (Sistema)")
     st.dataframe(
         ativos_sistema[["Ingrediente", "Preco_ton", "Umidade_pct", "MO_ms_pct", "C_pct", "N_pct", "P2O5_pct", "K2O_pct"]],
         use_container_width=True,
         hide_index=True,
     )
 
-    # Verificação preventiva de incompatibilidade
+    # 1º Filtro: Compatibilidade Química
     selecionados_s = ativos_sistema["Ingrediente"].tolist()
     incompat_s, limitados_s = classificar_compatibilidade(selecionados_s, df_compat)
 
     if incompat_s:
-        st.warning("Combinações INCOMPATÍVEIS detectadas. Selecione os itens para remover:")
+        st.warning("1º Passo: Combinações INCOMPATÍVEIS detectadas. Escolha a matéria-prima a remover em cada par:")
         rem_temp = set()
         for idx, (a, b) in enumerate(incompat_s):
-            esc = st.radio(f"Par {a} × {b}", [f"Remover {a}", f"Remover {b}"], key=f"sist_inc_{idx}")
+            esc = st.radio(f"Par: {a} × {b}", [f"Remover {a}", f"Remover {b}"], key=f"sist_inc_{idx}")
             rem_temp.add(a if esc == f"Remover {a}" else b)
         if st.button("Aplicar Remoções de Incompatibilidade (Sistema)"):
             st.session_state.removidos["sistema"].update(rem_temp)
             st.rerun()
 
-    if st.button("Calcular mistura (Sistema)", type="primary", disabled=bool(incompat_s)):
+    if st.button("Calcular Mistura (Sistema)", type="primary", disabled=bool(incompat_s)):
         metas_principais = {"C_pct": meta_c, "N_pct": meta_n, "P2O5_pct": meta_p, "K2O_pct": meta_k}
-        sol_ativos, status_msg, info = resolver_base_ativa(ativos_sistema, metas_principais, meta_adicionais, tolerancia, massa_final)
+        
+        sol_ativos, status_msg, info = resolver_base_ativa(
+            ativos_sistema, metas_principais, meta_adicionais, tolerancia, massa_final,
+            (permitir_bioclastico_sistema == "Sim"), pct_bioclastico_s
+        )
 
         if sol_ativos is None:
             st.error(status_msg)
+            st.session_state.calc_results["sistema"] = None
         else:
             inerte_escolhido, alerta_inerte, _, lim_inertes = escolher_inerte(sol_ativos, df_mat, df_compat, massa_final)
             if inerte_escolhido is None and lim_inertes:
@@ -620,17 +659,17 @@ with tab_sistema:
     # Exibição do Resultado Persistido
     res_s = st.session_state.calc_results["sistema"]
     if res_s is not None:
-        st.success("Solução ótima calculada com sucesso.")
+        st.success("Solução ótima calculada com sucesso!")
         massa_tot = res_s["Quantidade_kg"].sum()
         massa_ton = massa_tot / 1000.0
-        res_s["Participacao_pct"] = 100 * res_s["Quantidade_kg"] / massa_tot
-        res_s["Custo_total"] = res_s["Quantidade_kg"] * res_s["Preco_ton"] / 1000.0
+        res_s["Participacao_pct"] = round(100 * res_s["Quantidade_kg"] / massa_tot, 2)
+        res_s["Custo_total"] = round(res_s["Quantidade_kg"] * res_s["Preco_ton"] / 1000.0, 2)
 
-        st.subheader("Ingredientes selecionados")
+        st.subheader("Ingredientes Selecionados")
         mostrar = res_s[["Ingrediente", "Quantidade_kg", "Participacao_pct", "Preco_ton", "Custo_total"]].sort_values("Quantidade_kg", ascending=False)
         st.dataframe(mostrar, use_container_width=True, hide_index=True)
 
-        st.subheader("Insumos de produção")
+        st.subheader("Insumos de Produção")
         insumos_sel = []
         for idx, row in df_insumos.iterrows():
             if st.checkbox(f"Usar {row['Insumo']} (US$ {row['Preco_usd_ton']:.2f}/t)", key=f"ins_s_{idx}"):
@@ -646,30 +685,49 @@ with tab_sistema:
             {"Indicador": "Custo insumos (US$/t)", "Valor": f"{custo_ins_usd_t:.2f}"},
             {"Indicador": "Custo total (US$/t)", "Valor": f"{custo_tot_usd_t:.2f}"},
             {"Indicador": "Custo total (R$/t)", "Valor": f"{(custo_tot_usd_t * cotacao_efetiva):.2f}"},
+            {"Indicador": "Custo total do lote (US$)", "Valor": f"{(custo_tot_usd_t * massa_ton):.2f}"},
+            {"Indicador": "Custo total do lote (R$)", "Valor": f"{(custo_tot_usd_t * massa_ton * cotacao_efetiva):.2f}"},
         ])
         st.table(resumo_econ)
 
         resumo_nut = resumo_nutrientes_completo(res_s)
+        st.subheader("Composição Nutricional Final")
         st.dataframe(resumo_nut, use_container_width=True, hide_index=True)
 
         col_dl1, col_dl2 = st.columns(2)
         with col_dl1:
-            st.download_button("Baixar CSV", data=mostrar.to_csv(index=False).encode("utf-8"), file_name="resultado_sistema.csv", mime="text/csv")
+            st.download_button("Baixar CSV (Sistema)", data=mostrar.to_csv(index=False).encode("utf-8"), file_name="resultado_sistema.csv", mime="text/csv")
         with col_dl2:
             pdf_bytes = gerar_pdf_a4_paisagem(mostrar, resumo_econ, resumo_nut)
-            st.download_button("Baixar PDF (A4 Paisagem)", data=pdf_bytes, file_name="resultado_sistema.pdf", mime="application/pdf")
+            st.download_button("Baixar PDF A4 Paisagem (Sistema)", data=pdf_bytes, file_name="resultado_sistema.pdf", mime="application/pdf")
+
+        st.markdown("---")
+        st.markdown("**INNOVATERRA AGRISOLUTIONS**")
 
 # --------------------------------------------------------
-# Fluxo da aba Sugestão do usuário
+# Aba: Sugestão do Usuário
 # --------------------------------------------------------
 
 with tab_usuario:
-    st.subheader("Sugestão do usuário")
+    st.subheader("Sugestão do Usuário (Restrição de Estoque)")
 
     options_estoque = df_mat[df_mat["Tipo_funcao"] != "INERTE"]["Ingrediente"].unique().tolist()
-    ingredientes_usuario = st.multiselect("Estoque disponível", options=options_estoque, default=options_estoque, key="ing_u")
+    ingredientes_usuario = st.multiselect("Selecione as matérias-primas disponíveis no estoque:", options=options_estoque, default=options_estoque, key="ing_u")
 
-    permitir_bioclastico_usuario = st.radio("Permitir Bioclástico?", ["Não", "Sim"], key="bio_u", horizontal=True)
+    col_bio_u1, col_bio_u2 = st.columns([1, 2])
+    with col_bio_u1:
+        permitir_bioclastico_usuario = st.radio("Permitir Bioclástico?", ["Não", "Sim"], key="bio_u", horizontal=True)
+    with col_bio_u2:
+        pct_bioclastico_u = 0.0
+        if permitir_bioclastico_usuario == "Sim":
+            pct_bioclastico_u = st.number_input(
+                "Percentual de Bioclástico a adicionar (%)",
+                min_value=0.1,
+                max_value=100.0,
+                value=5.0,
+                step=0.5,
+                key="pct_bio_u"
+            )
 
     ativos_usuario = df_mat[df_mat["Ingrediente"].isin(ingredientes_usuario)].copy()
     if permitir_bioclastico_usuario == "Não":
@@ -678,28 +736,34 @@ with tab_usuario:
     if st.session_state.removidos["usuario"]:
         ativos_usuario = ativos_usuario[~ativos_usuario["Ingrediente"].isin(st.session_state.removidos["usuario"])].copy()
 
-    st.markdown("### Ingredientes disponíveis (Usuário)")
+    st.markdown("### Ingredientes Disponíveis (Usuário)")
     st.dataframe(ativos_usuario[["Ingrediente", "Preco_ton", "Umidade_pct", "MO_ms_pct", "C_pct", "N_pct", "P2O5_pct", "K2O_pct"]], use_container_width=True, hide_index=True)
 
+    # 1º Filtro: Compatibilidade Química
     selecionados_u = ativos_usuario["Ingrediente"].tolist()
     incompat_u, limitados_u = classificar_compatibilidade(selecionados_u, df_compat)
 
     if incompat_u:
-        st.warning("Combinações INCOMPATÍVEIS detectadas no estoque:")
+        st.warning("1º Passo: Combinações INCOMPATÍVEIS detectadas no estoque. Escolha a matéria-prima a remover em cada par:")
         rem_temp_u = set()
         for idx, (a, b) in enumerate(incompat_u):
-            esc = st.radio(f"Par {a} × {b}", [f"Remover {a}", f"Remover {b}"], key=f"usu_inc_{idx}")
+            esc = st.radio(f"Par: {a} × {b}", [f"Remover {a}", f"Remover {b}"], key=f"usu_inc_{idx}")
             rem_temp_u.add(a if esc == f"Remover {a}" else b)
         if st.button("Aplicar Remoções (Usuário)"):
             st.session_state.removidos["usuario"].update(rem_temp_u)
             st.rerun()
 
-    if st.button("Calcular mistura (Usuário)", type="primary", disabled=bool(incompat_u)):
+    if st.button("Calcular Mistura (Usuário)", type="primary", disabled=bool(incompat_u)):
         metas_principais_u = {"C_pct": meta_c, "N_pct": meta_n, "P2O5_pct": meta_p, "K2O_pct": meta_k}
-        sol_ativos_u, status_msg_u, info_u = resolver_base_ativa(ativos_usuario, metas_principais_u, meta_adicionais, tolerancia, massa_final)
+        
+        sol_ativos_u, status_msg_u, info_u = resolver_base_ativa(
+            ativos_usuario, metas_principais_u, meta_adicionais, tolerancia, massa_final,
+            (permitir_bioclastico_usuario == "Sim"), pct_bioclastico_u
+        )
 
         if sol_ativos_u is None:
             st.error(status_msg_u)
+            st.session_state.calc_results["usuario"] = None
         else:
             inerte_u, _, _, lim_inertes_u = escolher_inerte(sol_ativos_u, df_mat, df_compat, massa_final)
             if inerte_u is None and lim_inertes_u:
@@ -713,16 +777,17 @@ with tab_usuario:
 
     res_u = st.session_state.calc_results["usuario"]
     if res_u is not None:
-        st.success("Solução ótima (Usuário) calculada com sucesso.")
+        st.success("Solução ótima calculada com sucesso!")
         massa_tot_u = res_u["Quantidade_kg"].sum()
         massa_ton_u = massa_tot_u / 1000.0
-        res_u["Participacao_pct"] = 100 * res_u["Quantidade_kg"] / massa_tot_u
-        res_u["Custo_total"] = res_u["Quantidade_kg"] * res_u["Preco_ton"] / 1000.0
+        res_u["Participacao_pct"] = round(100 * res_u["Quantidade_kg"] / massa_tot_u, 2)
+        res_u["Custo_total"] = round(res_u["Quantidade_kg"] * res_u["Preco_ton"] / 1000.0, 2)
 
-        st.subheader("Ingredientes selecionados")
+        st.subheader("Ingredientes Selecionados")
         mostrar_u = res_u[["Ingrediente", "Quantidade_kg", "Participacao_pct", "Preco_ton", "Custo_total"]].sort_values("Quantidade_kg", ascending=False)
         st.dataframe(mostrar_u, use_container_width=True, hide_index=True)
 
+        st.subheader("Insumos de Produção")
         insumos_sel_u = []
         for idx, row in df_insumos.iterrows():
             if st.checkbox(f"Usar {row['Insumo']} (US$ {row['Preco_usd_ton']:.2f}/t)", key=f"ins_u_{idx}"):
@@ -738,15 +803,21 @@ with tab_usuario:
             {"Indicador": "Custo insumos (US$/t)", "Valor": f"{custo_ins_u:.2f}"},
             {"Indicador": "Custo total (US$/t)", "Valor": f"{custo_tot_u:.2f}"},
             {"Indicador": "Custo total (R$/t)", "Valor": f"{(custo_tot_u * cotacao_efetiva):.2f}"},
+            {"Indicador": "Custo total do lote (US$)", "Valor": f"{(custo_tot_u * massa_ton_u):.2f}"},
+            {"Indicador": "Custo total do lote (R$)", "Valor": f"{(custo_tot_u * massa_ton_u * cotacao_efetiva):.2f}"},
         ])
         st.table(resumo_econ_u)
 
         resumo_nut_u = resumo_nutrientes_completo(res_u)
+        st.subheader("Composição Nutricional Final")
         st.dataframe(resumo_nut_u, use_container_width=True, hide_index=True)
 
         col_dl1_u, col_dl2_u = st.columns(2)
         with col_dl1_u:
-            st.download_button("Baixar CSV", data=mostrar_u.to_csv(index=False).encode("utf-8"), file_name="resultado_usuario.csv", mime="text/csv")
+            st.download_button("Baixar CSV (Usuário)", data=mostrar_u.to_csv(index=False).encode("utf-8"), file_name="resultado_usuario.csv", mime="text/csv")
         with col_dl2_u:
             pdf_bytes_u = gerar_pdf_a4_paisagem(mostrar_u, resumo_econ_u, resumo_nut_u)
-            st.download_button("Baixar PDF (A4 Paisagem)", data=pdf_bytes_u, file_name="resultado_usuario.pdf", mime="application/pdf")
+            st.download_button("Baixar PDF A4 Paisagem (Usuário)", data=pdf_bytes_u, file_name="resultado_usuario.pdf", mime="application/pdf")
+
+        st.markdown("---")
+        st.markdown("**INNOVATERRA AGRISOLUTIONS**")
