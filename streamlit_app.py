@@ -271,7 +271,6 @@ def resolver_base_ativa(
     usar_bioclastico: bool,
     pct_bioclastico: float
 ):
-    # Considerar matérias-primas que contribuem com N, P2O5, K2O, Carbono ou Bioclástico
     mask_contribuintes = (
         (ativos["N_pct"] > 0) |
         (ativos["P2O5_pct"] > 0) |
@@ -297,13 +296,11 @@ def resolver_base_ativa(
         else:
             x[i] = LpVariable(f"x_{i}", lowBound=0.0)
 
-    # Variáveis de folga (Slacks) para diagnóstico de inviabilidade por nutriente
     slack_nutrientes = {
         col: LpVariable(f"slack_{col}", lowBound=0.0)
         for col, alvo in metas_todas.items() if alvo > 0
     }
 
-    # Função Objetivo: Custo Real das Matérias-Primas + Penalidade Altíssima para Slacks
     PENALIDADE_SLACK = 1e6
     prob += (
         lpSum(x[i] * float(ativos.loc[i, "Preco_ton"]) / 1000.0 for i in ativos.index) +
@@ -330,7 +327,6 @@ def resolver_base_ativa(
     prob.solve(PULP_CBC_CMD(msg=False))
     status = LpStatus[prob.status]
 
-    # Checar se houve ativação de Slacks (Déficit Nutricional por Falta de Espaço/Concentração)
     deficits = {}
     for col, var in slack_nutrientes.items():
         v = value(var)
@@ -447,7 +443,7 @@ def resumo_nutrientes_completo(df_resultado: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------
-# Exportação PDF (ReportLab - A4 Paisagem)
+# Exportação PDF (ReportLab - A4 Paisagem sem erro de caracteres Unicode)
 # --------------------------------------------------------
 
 
@@ -478,6 +474,16 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
         spaceBefore=8,
         spaceAfter=4
     )
+    cell_style = ParagraphStyle(
+        'CellText',
+        parent=styles['Normal'],
+        fontSize=8,
+        alignment=1
+    )
+
+    def sanitizar_texto_pdf(txt: str) -> str:
+        """Substitui subscritos Unicode por marcadores HTML compativeis com ReportLab"""
+        return str(txt).replace("₂", "<sub>2</sub>").replace("₅", "<sub>5</sub>")
 
     story = []
     story.append(Paragraph("INNOVATERRA AGRISOLUTIONS", title_style))
@@ -485,14 +491,18 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
     story.append(Spacer(1, 10))
 
     story.append(Paragraph("Composição das Matérias-Primas", subtitle_style))
-    data_ing = [df_ingredientes.columns.tolist()] + df_ingredientes.values.tolist()
+    
+    # Formatação da Tabela de Ingredientes
+    headers_ing = [Paragraph(f"<b>{sanitizar_texto_pdf(c)}</b>", cell_style) for c in df_ingredientes.columns]
+    data_ing = [headers_ing]
+    for row in df_ingredientes.values:
+        data_ing.append([Paragraph(sanitizar_texto_pdf(val), cell_style) for val in row])
+
     t_ing = Table(data_ing)
     t_ing.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2d6a4f')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 8),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 5),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
     ]))
@@ -501,21 +511,29 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
 
     story.append(Paragraph("Resumo Econômico & Composição Nutricional Final", subtitle_style))
     
-    data_econ = [df_resumo_econ.columns.tolist()] + df_resumo_econ.values.tolist()
+    # Formatação da Tabela de Resumo Econômico
+    headers_econ = [Paragraph(f"<b>{sanitizar_texto_pdf(c)}</b>", cell_style) for c in df_resumo_econ.columns]
+    data_econ = [headers_econ]
+    for row in df_resumo_econ.values:
+        data_econ.append([Paragraph(sanitizar_texto_pdf(val), cell_style) for val in row])
+
     t_econ = Table(data_econ)
     t_econ.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#40916c')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('FONTSIZE', (0, 0), (-1, -1), 8),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
     ]))
 
-    data_nut = [df_nutrientes.columns.tolist()] + df_nutrientes.values.tolist()
+    # Formatação da Tabela Nutricional
+    headers_nut = [Paragraph(f"<b>{sanitizar_texto_pdf(c)}</b>", cell_style) for c in df_nutrientes.columns]
+    data_nut = [headers_nut]
+    for row in df_nutrientes.values:
+        data_nut.append([Paragraph(sanitizar_texto_pdf(val), cell_style) for val in row])
+
     t_nut = Table(data_nut)
     t_nut.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#40916c')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('FONTSIZE', (0, 0), (-1, -1), 8),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
     ]))
 
@@ -548,7 +566,6 @@ st.markdown("**INNOVATERRA AGRISOLUTIONS**")
 # Barra Lateral (Sidebar)
 st.sidebar.header("INNOVATERRA AGRISOLUTIONS")
 
-# Opção 1: Botão para limpar cache e atualizar dados do Google Sheets em tempo real
 if st.sidebar.button("🔄 Recarregar Dados das Planilhas"):
     st.cache_data.clear()
     st.rerun()
