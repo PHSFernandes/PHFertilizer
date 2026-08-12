@@ -495,144 +495,236 @@ with tab_sistema:
     st.markdown("### Ingredientes disponíveis (Sistema)")
     st.dataframe(
         ativos_sistema[
-            ["Ingrediente", "Preco_ton", "Umidade_pct", "MO_ms_pct", "C_pct", "N_pct", "P2O5_pct", "K2O_pct"]
+            [
+                "Ingrediente",
+                "Preco_ton",
+                "Umidade_pct",
+                "MO_ms_pct",
+                "C_pct",
+                "N_pct",
+                "P2O5_pct",
+                "K2O_pct",
+            ]
         ],
         use_container_width=True,
         hide_index=True,
     )
 
     if st.button("Calcular mistura (Sistema)", type="primary"):
+        # 1) Resolver incompatibilidades pela sua escolha
         selecionados = ativos_sistema["Ingrediente"].tolist()
         incompat, limitados = classificar_compatibilidade(selecionados, df_compat)
 
-        if incompat:
-            txt = "; ".join([f"{a} × {b}" for a, b in incompat])
-            st.error(f"Há combinações INCOMPATÍVEIS no conjunto elegível: {txt}")
-        else:
-            if limitados:
-                txt = "; ".join([f"{a} × {b}" for a, b in limitados])
-                st.warning(f"Combinações LIMITADO detectadas: {txt}")
-                confirmar = st.checkbox(
-                    "Confirmo que desejo prosseguir mesmo com combinações LIMITADO",
-                    key="conf_lim_sistema",
-                )
-                if not confirmar:
-                    st.stop()
+        ingredientes_para_remover = set()
 
-            metas_principais = {"C_pct": meta_c, "N_pct": meta_n, "P2O5_pct": meta_p, "K2O_pct": meta_k}
-            sol_ativos, status_msg, info = resolver_base_ativa(
-                ativos_sistema, metas_principais, meta_adicionais, tolerancia, massa_final
+        if incompat:
+            st.warning(
+                "Foram encontradas combinações INCOMPATÍVEIS. "
+                "Escolha qual ingrediente remover em cada par."
             )
 
-            if sol_ativos is None:
-                st.error(status_msg)
+            for idx, (a, b) in enumerate(incompat):
+                st.write(f"{idx + 1}) {a} × {b} — INCOMPATÍVEL")
+                escolha = st.radio(
+                    f"Escolha para o par {a} × {b}",
+                    [f"Remover {a}", f"Remover {b}", "Não remover nenhum"],
+                    key=f"conf_incomp_sistema_{idx}",
+                )
+                if escolha.startswith("Remover"):
+                    nome = escolha.replace("Remover ", "")
+                    ingredientes_para_remover.add(nome)
+
+            aplicar_remocoes = st.button(
+                "Aplicar remoções de incompatibilidade (Sistema)",
+                key="btn_aplicar_incomp_sistema",
+            )
+
+            if aplicar_remocoes:
+                if len(ingredientes_para_remover) == 0 and len(incompat) > 0:
+                    st.error(
+                        "Nenhum ingrediente foi marcado para remoção, "
+                        "mas há pares INCOMPATÍVEIS. Remova pelo menos um ingrediente por par para prosseguir."
+                    )
+                    st.stop()
+
+                ativos_sistema = ativos_sistema[
+                    ~ativos_sistema["Ingrediente"].isin(ingredientes_para_remover)
+                ].copy()
+
+                selecionados_filtrados = ativos_sistema["Ingrediente"].tolist()
+                incompat2, limitados2 = classificar_compatibilidade(
+                    selecionados_filtrados, df_compat
+                )
+                if incompat2:
+                    txt2 = "; ".join([f"{a} × {b}" for a, b in incompat2])
+                    st.error(
+                        f"Ainda há combinações INCOMPATÍVEIS após remoção: {txt2}"
+                    )
+                    st.stop()
+
+                limitados = limitados2
             else:
-                inerte_escolhido, alerta_inerte, comp_inertes, lim_inertes = escolher_inerte(
-                    sol_ativos, df_mat, df_compat, massa_final
-                )
+                st.stop()
 
-                if inerte_escolhido is None and alerta_inerte:
-                    st.warning(alerta_inerte)
-                    if lim_inertes:
-                        nomes = ", ".join([str(t[0]["Ingrediente"]) for t in lim_inertes])
-                        confirmar_inerte = st.checkbox(
-                            "Confirmo que aceito usar material inerte em condição LIMITADO",
-                            key="conf_lim_inerte_sistema",
-                        )
-                        if confirmar_inerte:
-                            inerte_escolhido = lim_inertes[0][0]
-                        else:
-                            st.stop()
+        # 2) Tratar LIMITADO com confirmação
+        if limitados:
+            txt_lim = "; ".join([f"{a} × {b}" for a, b in limitados])
+            st.warning(f"Combinações LIMITADO detectadas: {txt_lim}")
+            confirmar_lim = st.checkbox(
+                "Confirmo que desejo prosseguir mesmo com combinações LIMITADO",
+                key="conf_lim_sistema",
+            )
+            if not confirmar_lim:
+                st.stop()
+
+        # 3) Resolver base ativa
+        metas_principais = {
+            "C_pct": meta_c,
+            "N_pct": meta_n,
+            "P2O5_pct": meta_p,
+            "K2O_pct": meta_k,
+        }
+        sol_ativos, status_msg, info = resolver_base_ativa(
+            ativos_sistema, metas_principais, meta_adicionais, tolerancia, massa_final
+        )
+
+        if sol_ativos is None:
+            st.error(status_msg)
+        else:
+            inerte_escolhido, alerta_inerte, comp_inertes, lim_inertes = escolher_inerte(
+                sol_ativos, df_mat, df_compat, massa_final
+            )
+
+            if inerte_escolhido is None and alerta_inerte:
+                st.warning(alerta_inerte)
+                if lim_inertes:
+                    nomes_lim = ", ".join(
+                        [str(t[0]["Ingrediente"]) for t in lim_inertes]
+                    )
+                    st.info(
+                        f"Inertes em condição LIMITADO disponíveis: {nomes_lim}."
+                    )
+                    confirmar_inerte = st.checkbox(
+                        "Confirmo que aceito usar material inerte em condição LIMITADO",
+                        key="conf_lim_inerte_sistema",
+                    )
+                    if confirmar_inerte:
+                        inerte_escolhido = lim_inertes[0][0]
                     else:
-                        st.error("Nenhum inerte elegível para completar a massa final.")
                         st.stop()
+                else:
+                    st.error(
+                        "Nenhum inerte elegível para completar a massa final."
+                    )
+                    st.stop()
 
-                # Montar resultado final (ativos + inerte)
-                frames = [sol_ativos.copy()]
-                if inerte_escolhido is not None:
-                    frames.append(pd.DataFrame([inerte_escolhido]))
-                resultado = pd.concat(frames, ignore_index=True)
+            frames = [sol_ativos.copy()]
+            if inerte_escolhido is not None:
+                frames.append(pd.DataFrame([inerte_escolhido]))
+            resultado = pd.concat(frames, ignore_index=True)
 
-                massa_total_kg = resultado["Quantidade_kg"].sum()
-                massa_total_ton = massa_total_kg / 1000.0
-                resultado["Participacao_pct"] = 100 * resultado["Quantidade_kg"] / massa_total_kg
-                resultado["Custo_total"] = resultado["Quantidade_kg"] * resultado["Preco_ton"] / 1000.0
+            massa_total_kg = resultado["Quantidade_kg"].sum()
+            massa_total_ton = massa_total_kg / 1000.0
+            resultado["Participacao_pct"] = (
+                100 * resultado["Quantidade_kg"] / massa_total_kg
+            )
+            resultado["Custo_total"] = (
+                resultado["Quantidade_kg"] * resultado["Preco_ton"] / 1000.0
+            )
 
-                st.success("Solução ótima encontrada (Sugestão do sistema).")
+            st.success("Solução ótima encontrada (Sugestão do sistema).")
 
-                st.subheader("Ingredientes selecionados")
-                mostrar = resultado[
+            st.subheader("Ingredientes selecionados")
+            mostrar = resultado[
+                [
+                    "Ingrediente",
+                    "Quantidade_kg",
+                    "Participacao_pct",
+                    "Preco_ton",
+                    "C_pct",
+                    "N_pct",
+                    "P2O5_pct",
+                    "K2O_pct",
+                    "Custo_total",
+                ]
+            ].sort_values("Quantidade_kg", ascending=False)
+            st.dataframe(mostrar, use_container_width=True, hide_index=True)
+
+            # Insumos
+            st.subheader("Insumos de produção (Sistema)")
+            insumos_selecionados = []
+            for idx, row in df_insumos.iterrows():
+                usar = st.checkbox(
+                    f"Usar {row['Insumo']} (US$ {row['Preco_usd_ton']:.2f}/t)",
+                    key=f"ins_sist_{idx}",
+                    value=False,
+                )
+                if usar:
+                    insumos_selecionados.append(row)
+
+            custo_mat_usd_ton = resultado["Custo_total"].sum() / massa_total_ton
+            custo_ins_usd_ton = (
+                sum(r["Preco_usd_ton"] for r in insumos_selecionados)
+                if insumos_selecionados
+                else 0.0
+            )
+            custo_total_usd_ton = custo_mat_usd_ton + custo_ins_usd_ton
+
+            custo_mat_usd_lote = custo_mat_usd_ton * massa_total_ton
+            custo_ins_usd_lote = custo_ins_usd_ton * massa_total_ton
+            custo_total_usd_lote = custo_mat_usd_lote + custo_ins_usd_lote
+
+            custo_total_brl_ton = custo_total_usd_ton * cotacao_efetiva
+            custo_total_brl_lote = custo_total_usd_lote * cotacao_efetiva
+
+            resumo_comp = resumo_nutrientes_completo(resultado)
+
+            st.subheader("Resumo econômico (Sistema)")
+            st.table(
+                pd.DataFrame(
                     [
-                        "Ingrediente",
-                        "Quantidade_kg",
-                        "Participacao_pct",
-                        "Preco_ton",
-                        "C_pct",
-                        "N_pct",
-                        "P2O5_pct",
-                        "K2O_pct",
-                        "Custo_total",
+                        {"Indicador": "Massa total (kg)", "Valor": massa_total_kg},
+                        {
+                            "Indicador": "Custo matérias-primas (US$/t)",
+                            "Valor": custo_mat_usd_ton,
+                        },
+                        {
+                            "Indicador": "Custo insumos (US$/t)",
+                            "Valor": custo_ins_usd_ton,
+                        },
+                        {
+                            "Indicador": "Custo total (US$/t)",
+                            "Valor": custo_total_usd_ton,
+                        },
+                        {
+                            "Indicador": "Custo total (R$/t)",
+                            "Valor": custo_total_brl_ton,
+                        },
+                        {
+                            "Indicador": "Custo total do lote (US$)",
+                            "Valor": custo_total_usd_lote,
+                        },
+                        {
+                            "Indicador": "Custo total do lote (R$)",
+                            "Valor": custo_total_brl_lote,
+                        },
                     ]
-                ].sort_values("Quantidade_kg", ascending=False)
-                st.dataframe(mostrar, use_container_width=True, hide_index=True)
-
-                # Insumos
-                st.subheader("Insumos de produção (Sistema)")
-                insumos_selecionados = []
-                for idx, row in df_insumos.iterrows():
-                    usar = st.checkbox(
-                        f"Usar {row['Insumo']} (US$ {row['Preco_usd_ton']:.2f}/t)",
-                        key=f"ins_sist_{idx}",
-                        value=False,
-                    )
-                    if usar:
-                        insumos_selecionados.append(row)
-
-                custo_mat_usd_ton = resultado["Custo_total"].sum() / massa_total_ton
-                custo_ins_usd_ton = (
-                    sum(r["Preco_usd_ton"] for r in insumos_selecionados)
-                    if insumos_selecionados
-                    else 0.0
                 )
-                custo_total_usd_ton = custo_mat_usd_ton + custo_ins_usd_ton
+            )
 
-                custo_mat_usd_lote = custo_mat_usd_ton * massa_total_ton
-                custo_ins_usd_lote = custo_ins_usd_ton * massa_total_ton
-                custo_total_usd_lote = custo_mat_usd_lote + custo_ins_usd_lote
+            st.subheader("Composição final da mistura (Sistema)")
+            st.dataframe(resumo_comp, use_container_width=True, hide_index=True)
 
-                custo_total_brl_ton = custo_total_usd_ton * cotacao_efetiva
-                custo_total_brl_lote = custo_total_usd_lote * cotacao_efetiva
+            csv = mostrar.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Baixar resultado em CSV (Sistema)",
+                data=csv,
+                file_name="resultado_mistura_sistema.csv",
+                mime="text/csv",
+            )
 
-                resumo_comp = resumo_nutrientes_completo(resultado)
-
-                st.subheader("Resumo econômico (Sistema)")
-                st.table(
-                    pd.DataFrame(
-                        [
-                            {"Indicador": "Massa total (kg)", "Valor": massa_total_kg},
-                            {"Indicador": "Custo matérias-primas (US$/t)", "Valor": custo_mat_usd_ton},
-                            {"Indicador": "Custo insumos (US$/t)", "Valor": custo_ins_usd_ton},
-                            {"Indicador": "Custo total (US$/t)", "Valor": custo_total_usd_ton},
-                            {"Indicador": "Custo total (R$/t)", "Valor": custo_total_brl_ton},
-                            {"Indicador": "Custo total do lote (US$)", "Valor": custo_total_usd_lote},
-                            {"Indicador": "Custo total do lote (R$)", "Valor": custo_total_brl_lote},
-                        ]
-                    )
-                )
-
-                st.subheader("Composição final da mistura (Sistema)")
-                st.dataframe(resumo_comp, use_container_width=True, hide_index=True)
-
-                csv = mostrar.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "Baixar resultado em CSV (Sistema)",
-                    data=csv,
-                    file_name="resultado_mistura_sistema.csv",
-                    mime="text/csv",
-                )
-
-                st.markdown("---")
-                st.markdown("**INNOVATERRA AGRISOLUTIONS**")
+            st.markdown("---")
+            st.markdown("**INNOVATERRA AGRISOLUTIONS**")
 
 # --------------------------------------------------------
 # Fluxo da aba Sugestão do usuário
@@ -668,7 +760,16 @@ with tab_usuario:
     st.markdown("### Ingredientes disponíveis (Usuário)")
     st.dataframe(
         ativos_usuario[
-            ["Ingrediente", "Preco_ton", "Umidade_pct", "MO_ms_pct", "C_pct", "N_pct", "P2O5_pct", "K2O_pct"]
+            [
+                "Ingrediente",
+                "Preco_ton",
+                "Umidade_pct",
+                "MO_ms_pct",
+                "C_pct",
+                "N_pct",
+                "P2O5_pct",
+                "K2O_pct",
+            ]
         ],
         use_container_width=True,
         hide_index=True,
@@ -678,156 +779,216 @@ with tab_usuario:
         selecionados_u = ativos_usuario["Ingrediente"].tolist()
         incompat_u, limitados_u = classificar_compatibilidade(selecionados_u, df_compat)
 
-        if incompat_u:
-            txt = "; ".join([f"{a} × {b}" for a, b in incompat_u])
-            st.error(f"Há combinações INCOMPATÍVEIS no conjunto de estoque: {txt}")
-        else:
-            if limitados_u:
-                txt = "; ".join([f"{a} × {b}" for a, b in limitados_u])
-                st.warning(f"Combinações LIMITADO detectadas: {txt}")
-                confirmar = st.checkbox(
-                    "Confirmo que desejo prosseguir mesmo com combinações LIMITADO",
-                    key="conf_lim_usuario",
-                )
-                if not confirmar:
-                    st.stop()
+        ingredientes_para_remover_u = set()
 
-            metas_principais = {"C_pct": meta_c, "N_pct": meta_n, "P2O5_pct": meta_p, "K2O_pct": meta_k}
-            sol_ativos_u, status_msg_u, info_u = resolver_base_ativa(
-                ativos_usuario, metas_principais, meta_adicionais, tolerancia, massa_final
+        if incompat_u:
+            st.warning(
+                "Foram encontradas combinações INCOMPATÍVEIS no estoque. "
+                "Escolha qual ingrediente remover em cada par."
             )
 
-            if sol_ativos_u is None:
-                st.error(status_msg_u)
+            for idx, (a, b) in enumerate(incompat_u):
+                st.write(f"{idx + 1}) {a} × {b} — INCOMPATÍVEL")
+                escolha_u = st.radio(
+                    f"Escolha para o par {a} × {b}",
+                    [f"Remover {a}", f"Remover {b}", "Não remover nenhum"],
+                    key=f"conf_incomp_usuario_{idx}",
+                )
+                if escolha_u.startswith("Remover"):
+                    nome_u = escolha_u.replace("Remover ", "")
+                    ingredientes_para_remover_u.add(nome_u)
+
+            aplicar_remocoes_u = st.button(
+                "Aplicar remoções de incompatibilidade (Usuário)",
+                key="btn_aplicar_incomp_usuario",
+            )
+
+            if aplicar_remocoes_u:
+                if len(ingredientes_para_remover_u) == 0 and len(incompat_u) > 0:
+                    st.error(
+                        "Nenhum ingrediente foi marcado para remoção, "
+                        "mas há pares INCOMPATÍVEIS. Remova pelo menos um ingrediente por par para prosseguir."
+                    )
+                    st.stop()
+
+                ativos_usuario = ativos_usuario[
+                    ~ativos_usuario["Ingrediente"].isin(ingredientes_para_remover_u)
+                ].copy()
+
+                selecionados_filtrados_u = ativos_usuario["Ingrediente"].tolist()
+                incompat2_u, limitados2_u = classificar_compatibilidade(
+                    selecionados_filtrados_u, df_compat
+                )
+                if incompat2_u:
+                    txt2_u = "; ".join([f"{a} × {b}" for a, b in incompat2_u])
+                    st.error(
+                        f"Ainda há combinações INCOMPATÍVEIS após remoção: {txt2_u}"
+                    )
+                    st.stop()
+
+                limitados_u = limitados2_u
             else:
-                inerte_escolhido_u, alerta_inerte_u, comp_inertes_u, lim_inertes_u = escolher_inerte(
-                    sol_ativos_u, df_mat, df_compat, massa_final
-                )
+                st.stop()
 
-                if inerte_escolhido_u is None and alerta_inerte_u:
-                    st.warning(alerta_inerte_u)
-                    if lim_inertes_u:
-                        nomes = ", ".join(
-                            [str(t[0]["Ingrediente"]) for t in lim_inertes_u]
-                        )
-                        confirmar_inerte_u = st.checkbox(
-                            "Confirmo que aceito usar material inerte em condição LIMITADO",
-                            key="conf_lim_inerte_usuario",
-                        )
-                        if confirmar_inerte_u:
-                            inerte_escolhido_u = lim_inertes_u[0][0]
-                        else:
-                            st.stop()
+        if limitados_u:
+            txt_lim_u = "; ".join([f"{a} × {b}" for a, b in limitados_u])
+            st.warning(f"Combinações LIMITADO detectadas: {txt_lim_u}")
+            confirmar_lim_u = st.checkbox(
+                "Confirmo que desejo prosseguir mesmo com combinações LIMITADO",
+                key="conf_lim_usuario",
+            )
+            if not confirmar_lim_u:
+                st.stop()
+
+        metas_principais_u = {
+            "C_pct": meta_c,
+            "N_pct": meta_n,
+            "P2O5_pct": meta_p,
+            "K2O_pct": meta_k,
+        }
+        sol_ativos_u, status_msg_u, info_u = resolver_base_ativa(
+            ativos_usuario, metas_principais_u, meta_adicionais, tolerancia, massa_final
+        )
+
+        if sol_ativos_u is None:
+            st.error(status_msg_u)
+        else:
+            inerte_escolhido_u, alerta_inerte_u, comp_inertes_u, lim_inertes_u = escolher_inerte(
+                sol_ativos_u, df_mat, df_compat, massa_final
+            )
+
+            if inerte_escolhido_u is None and alerta_inerte_u:
+                st.warning(alerta_inerte_u)
+                if lim_inertes_u:
+                    nomes_lim_u = ", ".join(
+                        [str(t[0]["Ingrediente"]) for t in lim_inertes_u]
+                    )
+                    st.info(
+                        f"Inertes em condição LIMITADO disponíveis: {nomes_lim_u}."
+                    )
+                    confirmar_inerte_u = st.checkbox(
+                        "Confirmo que aceito usar material inerte em condição LIMITADO",
+                        key="conf_lim_inerte_usuario",
+                    )
+                    if confirmar_inerte_u:
+                        inerte_escolhido_u = lim_inertes_u[0][0]
                     else:
-                        st.error("Nenhum inerte elegível para completar a massa final.")
                         st.stop()
+                else:
+                    st.error(
+                        "Nenhum inerte elegível para completar a massa final."
+                    )
+                    st.stop()
 
-                frames_u = [sol_ativos_u.copy()]
-                if inerte_escolhido_u is not None:
-                    frames_u.append(pd.DataFrame([inerte_escolhido_u]))
-                resultado_u = pd.concat(frames_u, ignore_index=True)
+            frames_u = [sol_ativos_u.copy()]
+            if inerte_escolhido_u is not None:
+                frames_u.append(pd.DataFrame([inerte_escolhido_u]))
+            resultado_u = pd.concat(frames_u, ignore_index=True)
 
-                massa_total_kg_u = resultado_u["Quantidade_kg"].sum()
-                massa_total_ton_u = massa_total_kg_u / 1000.0
-                resultado_u["Participacao_pct"] = (
-                    100 * resultado_u["Quantidade_kg"] / massa_total_kg_u
+            massa_total_kg_u = resultado_u["Quantidade_kg"].sum()
+            massa_total_ton_u = massa_total_kg_u / 1000.0
+            resultado_u["Participacao_pct"] = (
+                100 * resultado_u["Quantidade_kg"] / massa_total_kg_u
+            )
+            resultado_u["Custo_total"] = (
+                resultado_u["Quantidade_kg"] * resultado_u["Preco_ton"] / 1000.0
+            )
+
+            st.success("Solução ótima encontrada (Sugestão do usuário).")
+
+            st.subheader("Ingredientes selecionados (Usuário)")
+            mostrar_u = resultado_u[
+                [
+                    "Ingrediente",
+                    "Quantidade_kg",
+                    "Participacao_pct",
+                    "Preco_ton",
+                    "C_pct",
+                    "N_pct",
+                    "P2O5_pct",
+                    "K2O_pct",
+                    "Custo_total",
+                ]
+            ].sort_values("Quantidade_kg", ascending=False)
+            st.dataframe(mostrar_u, use_container_width=True, hide_index=True)
+
+            # Insumos
+            st.subheader("Insumos de produção (Usuário)")
+            insumos_sel_u = []
+            for idx, row in df_insumos.iterrows():
+                usar_u = st.checkbox(
+                    f"Usar {row['Insumo']} (US$ {row['Preco_usd_ton']:.2f}/t)",
+                    key=f"ins_usu_{idx}",
+                    value=False,
                 )
-                resultado_u["Custo_total"] = (
-                    resultado_u["Quantidade_kg"] * resultado_u["Preco_ton"] / 1000.0
-                )
+                if usar_u:
+                    insumos_sel_u.append(row)
 
-                st.success("Solução ótima encontrada (Sugestão do usuário).")
+            custo_mat_usd_ton_u = (
+                resultado_u["Custo_total"].sum() / massa_total_ton_u
+            )
+            custo_ins_usd_ton_u = (
+                sum(r["Preco_usd_ton"] for r in insumos_sel_u)
+                if insumos_sel_u
+                else 0.0
+            )
+            custo_total_usd_ton_u = custo_mat_usd_ton_u + custo_ins_usd_ton_u
 
-                st.subheader("Ingredientes selecionados (Usuário)")
-                mostrar_u = resultado_u[
+            custo_mat_usd_lote_u = custo_mat_usd_ton_u * massa_total_ton_u
+            custo_ins_usd_lote_u = custo_ins_usd_ton_u * massa_total_ton_u
+            custo_total_usd_lote_u = custo_mat_usd_lote_u + custo_ins_usd_lote_u
+
+            custo_total_brl_ton_u = custo_total_usd_ton_u * cotacao_efetiva
+            custo_total_brl_lote_u = custo_total_usd_lote_u * cotacao_efetiva
+
+            resumo_comp_u = resumo_nutrientes_completo(resultado_u)
+
+            st.subheader("Resumo econômico (Usuário)")
+            st.table(
+                pd.DataFrame(
                     [
-                        "Ingrediente",
-                        "Quantidade_kg",
-                        "Participacao_pct",
-                        "Preco_ton",
-                        "C_pct",
-                        "N_pct",
-                        "P2O5_pct",
-                        "K2O_pct",
-                        "Custo_total",
+                        {
+                            "Indicador": "Massa total (kg)",
+                            "Valor": massa_total_kg_u,
+                        },
+                        {
+                            "Indicador": "Custo matérias-primas (US$/t)",
+                            "Valor": custo_mat_usd_ton_u,
+                        },
+                        {
+                            "Indicador": "Custo insumos (US$/t)",
+                            "Valor": custo_ins_usd_ton_u,
+                        },
+                        {
+                            "Indicador": "Custo total (US$/t)",
+                            "Valor": custo_total_usd_ton_u,
+                        },
+                        {
+                            "Indicador": "Custo total (R$/t)",
+                            "Valor": custo_total_brl_ton_u,
+                        },
+                        {
+                            "Indicador": "Custo total do lote (US$)",
+                            "Valor": custo_total_usd_lote_u,
+                        },
+                        {
+                            "Indicador": "Custo total do lote (R$)",
+                            "Valor": custo_total_brl_lote_u,
+                        },
                     ]
-                ].sort_values("Quantidade_kg", ascending=False)
-                st.dataframe(mostrar_u, use_container_width=True, hide_index=True)
-
-                # Insumos
-                st.subheader("Insumos de produção (Usuário)")
-                insumos_sel_u = []
-                for idx, row in df_insumos.iterrows():
-                    usar_u = st.checkbox(
-                        f"Usar {row['Insumo']} (US$ {row['Preco_usd_ton']:.2f}/t)",
-                        key=f"ins_usu_{idx}",
-                        value=False,
-                    )
-                    if usar_u:
-                        insumos_sel_u.append(row)
-
-                custo_mat_usd_ton_u = (
-                    resultado_u["Custo_total"].sum() / massa_total_ton_u
                 )
-                custo_ins_usd_ton_u = (
-                    sum(r["Preco_usd_ton"] for r in insumos_sel_u)
-                    if insumos_sel_u
-                    else 0.0
-                )
-                custo_total_usd_ton_u = custo_mat_usd_ton_u + custo_ins_usd_ton_u
+            )
 
-                custo_mat_usd_lote_u = custo_mat_usd_ton_u * massa_total_ton_u
-                custo_ins_usd_lote_u = custo_ins_usd_ton_u * massa_total_ton_u
-                custo_total_usd_lote_u = custo_mat_usd_lote_u + custo_ins_usd_lote_u
+            st.subheader("Composição final da mistura (Usuário)")
+            st.dataframe(resumo_comp_u, use_container_width=True, hide_index=True)
 
-                custo_total_brl_ton_u = custo_total_usd_ton_u * cotacao_efetiva
-                custo_total_brl_lote_u = custo_total_usd_lote_u * cotacao_efetiva
+            csv_u = mostrar_u.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Baixar resultado em CSV (Usuário)",
+                data=csv_u,
+                file_name="resultado_mistura_usuario.csv",
+                mime="text/csv",
+            )
 
-                resumo_comp_u = resumo_nutrientes_completo(resultado_u)
-
-                st.subheader("Resumo econômico (Usuário)")
-                st.table(
-                    pd.DataFrame(
-                        [
-                            {"Indicador": "Massa total (kg)", "Valor": massa_total_kg_u},
-                            {
-                                "Indicador": "Custo matérias-primas (US$/t)",
-                                "Valor": custo_mat_usd_ton_u,
-                            },
-                            {
-                                "Indicador": "Custo insumos (US$/t)",
-                                "Valor": custo_ins_usd_ton_u,
-                            },
-                            {
-                                "Indicador": "Custo total (US$/t)",
-                                "Valor": custo_total_usd_ton_u,
-                            },
-                            {
-                                "Indicador": "Custo total (R$/t)",
-                                "Valor": custo_total_brl_ton_u,
-                            },
-                            {
-                                "Indicador": "Custo total do lote (US$)",
-                                "Valor": custo_total_usd_lote_u,
-                            },
-                            {
-                                "Indicador": "Custo total do lote (R$)",
-                                "Valor": custo_total_brl_lote_u,
-                            },
-                        ]
-                    )
-                )
-
-                st.subheader("Composição final da mistura (Usuário)")
-                st.dataframe(resumo_comp_u, use_container_width=True, hide_index=True)
-
-                csv_u = mostrar_u.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "Baixar resultado em CSV (Usuário)",
-                    data=csv_u,
-                    file_name="resultado_mistura_usuario.csv",
-                    mime="text/csv",
-                )
-
-                st.markdown("---")
-                st.markdown("**INNOVATERRA AGRISOLUTIONS**")
+            st.markdown("---")
+            st.markdown("**INNOVATERRA AGRISOLUTIONS**")
