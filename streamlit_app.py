@@ -1,4 +1,5 @@
 import io
+import os
 import requests
 from itertools import combinations
 from urllib.parse import quote
@@ -19,13 +20,26 @@ from pulp import (
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image as RLImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 # --------------------------------------------------------
 # Configuração básica da página
 # --------------------------------------------------------
 
 st.set_page_config(page_title="Otimizador de Misturas NPK+C", layout="wide")
+
+# Caminho exato da logomarca
+LOGO_PATH_PRINCIPAL = "PHFertilizer/innovaterra - logomarca modificada por PH.png"
+LOGO_PATH_ALTERNATIVO = "innovaterra - logomarca modificada por PH.png"
+
+def obter_caminho_logo() -> str | None:
+    if os.path.exists(LOGO_PATH_PRINCIPAL):
+        return LOGO_PATH_PRINCIPAL
+    if os.path.exists(LOGO_PATH_ALTERNATIVO):
+        return LOGO_PATH_ALTERNATIVO
+    return None
+
+LOGO_FILE = obter_caminho_logo()
 
 # IDs das planilhas Google Sheets
 INSUMOS_SHEET_ID = "1rUIG49XF9eszt-4c_iS45bNLMEFlgpokVDG-qwFOF1k"
@@ -275,7 +289,6 @@ def resolver_base_ativa(
     usar_bioclastico: bool,
     pct_bioclastico: float
 ):
-    # Considera quem tem nutrientes OU quem for o Bioclástico
     mask_contribuintes = (
         (ativos["N_pct"] > 0) |
         (ativos["P2O5_pct"] > 0) |
@@ -308,12 +321,10 @@ def resolver_base_ativa(
 
     total_ativos = lpSum(x[i] for i in ativos.index)
 
-    # Identificação e trava da proporção exata do Bioclástico
     if usar_bioclastico:
         bio_indices = [i for i in ativos.index if eh_bioclastico(ativos.loc[i, "Ingrediente"])]
         if bio_indices:
             idx_bio = bio_indices[0]
-            # Bioclástico deve ser exatamente a fração informada da massa total calculada
             prob += x[idx_bio] == (pct_bioclastico / 100.0) * total_ativos
 
     for col, alvo in metas_todas.items():
@@ -443,7 +454,7 @@ def resumo_nutrientes_completo(df_resultado: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------
-# Exportação PDF (ReportLab - A4 Paisagem)
+# Exportação PDF (ReportLab - A4 Paisagem com Logomarca)
 # --------------------------------------------------------
 
 
@@ -463,8 +474,8 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
         parent=styles['Heading1'],
         fontSize=18,
         textColor=colors.HexColor('#1b4332'),
-        alignment=1,
-        spaceAfter=10
+        alignment=0,
+        spaceAfter=4
     )
     subtitle_style = ParagraphStyle(
         'DocSubTitle',
@@ -485,10 +496,28 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
         return str(txt).replace("₂", "<sub>2</sub>").replace("₅", "<sub>5</sub>")
 
     story = []
-    story.append(Paragraph("INNOVATERRA AGRISOLUTIONS", title_style))
-    story.append(Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Heading3']))
-    story.append(Spacer(1, 10))
 
+    caminho_logo = obter_caminho_logo()
+    if caminho_logo:
+        try:
+            img_logo = RLImage(caminho_logo, width=110, height=45)
+            text_block = [
+                Paragraph("<b>INNOVATERRA AGRISOLUTIONS</b>", title_style),
+                Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Normal'])
+            ]
+            header_table = Table([[img_logo, text_block]], colWidths=[120, 660])
+            header_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ]))
+            story.append(header_table)
+        except Exception:
+            story.append(Paragraph("INNOVATERRA AGRISOLUTIONS", title_style))
+            story.append(Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Heading3']))
+    else:
+        story.append(Paragraph("INNOVATERRA AGRISOLUTIONS", title_style))
+        story.append(Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Heading3']))
+
+    story.append(Spacer(1, 10))
     story.append(Paragraph("Composição das Matérias-Primas", subtitle_style))
     
     headers_ing = [Paragraph(f"<b>{sanitizar_texto_pdf(c)}</b>", cell_style) for c in df_ingredientes.columns]
@@ -556,9 +585,23 @@ if "removidos" not in st.session_state:
 # Interface Principal e Barra Lateral
 # --------------------------------------------------------
 
-st.title("Otimizador de Misturas NPK + Carbono")
-st.markdown("**INNOVATERRA AGRISOLUTIONS**")
+caminho_logo = obter_caminho_logo()
 
+# Cabeçalho Principal com Logo
+if caminho_logo:
+    col_logo, col_tit = st.columns([1, 6])
+    with col_logo:
+        st.image(caminho_logo, width=130)
+    with col_tit:
+        st.title("Otimizador de Misturas NPK + Carbono")
+        st.markdown("**INNOVATERRA AGRISOLUTIONS**")
+else:
+    st.title("Otimizador de Misturas NPK + Carbono")
+    st.markdown("**INNOVATERRA AGRISOLUTIONS**")
+
+# Barra Lateral (Sidebar)
+if caminho_logo:
+    st.sidebar.image(caminho_logo, use_container_width=True)
 st.sidebar.header("INNOVATERRA AGRISOLUTIONS")
 
 if st.sidebar.button("🔄 Recarregar Dados das Planilhas"):
