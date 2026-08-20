@@ -1,4 +1,5 @@
 import io
+import math
 import os
 import requests
 from itertools import combinations
@@ -43,7 +44,6 @@ def obter_bytes_logo():
         if os.path.exists(caminho):
             try:
                 pil_img = PILImage.open(caminho)
-                # Converte RGBA para garantir integridade do canal alfa no PDF
                 if pil_img.mode not in ('RGB', 'RGBA'):
                     pil_img = pil_img.convert('RGBA')
                 
@@ -112,6 +112,42 @@ def gs_csv_url(sheet_id: str, sheet_name: str) -> str:
 
 def eh_bioclastico(nome: str) -> bool:
     return "biocl" in str(nome).lower()
+
+
+def eh_insumo_discreto(nome_insumo: str) -> bool:
+    """Identifica se o insumo precisa ser arredondado para cima em unidades inteiras (ex: Big Bag, Pallet)"""
+    n = str(nome_insumo).lower()
+    return "big bag" in n or "bigbag" in n or "pallet" in n or "palete" in n
+
+
+def calcular_custos_insumos(insumos_selecionados: list, massa_ton: float):
+    """Calcula custos totais e unitários respeitando arredondamento de Pallets e Big Bags"""
+    custo_total_lote_usd = 0.0
+    detalhes_insumos = []
+    
+    # 1 Big Bag e 1 Pallet comportam até 1 tonelada (1000 kg)
+    unidades_inteiras = max(1, math.ceil(massa_ton))
+
+    for item in insumos_selecionados:
+        preco_unit = float(item["Preco_usd_ton"])
+        if eh_insumo_discreto(item["Insumo"]):
+            custo_item_lote = unidades_inteiras * preco_unit
+            qtd_desc = f"{unidades_inteiras} un"
+        else:
+            custo_item_lote = massa_ton * preco_unit
+            qtd_desc = f"{massa_ton:.2f} t"
+
+        custo_total_lote_usd += custo_item_lote
+        detalhes_insumos.append({
+            "Insumo": item["Insumo"],
+            "Preco_base_usd": preco_unit,
+            "Quantidade_aplicada": qtd_desc,
+            "Custo_lote_usd": custo_item_lote,
+            "Custo_ton_usd": custo_item_lote / massa_ton if massa_ton > 0 else 0.0
+        })
+
+    custo_total_ton_usd = custo_total_lote_usd / massa_ton if massa_ton > 0 else 0.0
+    return custo_total_ton_usd, custo_total_lote_usd, detalhes_insumos
 
 
 # --------------------------------------------------------
@@ -498,7 +534,7 @@ def gerar_pdf_a4_paisagem(
     df_ingredientes: pd.DataFrame,
     df_resumo_econ: pd.DataFrame,
     df_nutrientes: pd.DataFrame,
-    insumos_selecionados: list,
+    detalhes_insumos: list,
     tipo_origem: str = "Sugestão do Sistema"
 ) -> bytes:
     buffer = io.BytesIO()
@@ -539,7 +575,6 @@ def gerar_pdf_a4_paisagem(
 
     story = []
 
-    # Inclusão da logo via Stream de Bytes sem perda
     img_element = None
     if LOGO_BYTES:
         try:
@@ -582,22 +617,28 @@ def gerar_pdf_a4_paisagem(
     ]))
     story.append(t_ing)
 
-    # Insumos de Produção Selecionados
-    if insumos_selecionados:
+    # Insumos de Produção com detalhamento de embalagens arredondadas
+    if detalhes_insumos:
         story.append(Spacer(1, 5))
         story.append(Paragraph("Insumos de Produção Selecionados", subtitle_style))
         headers_ins = [
             Paragraph("<b>Insumo</b>", cell_style), 
-            Paragraph("<b>Custo Adicional (US$/t)</b>", cell_style)
+            Paragraph("<b>Qtd. Considerada</b>", cell_style),
+            Paragraph("<b>Preço Unitário (US$)</b>", cell_style),
+            Paragraph("<b>Custo no Lote (US$)</b>", cell_style),
+            Paragraph("<b>Impacto (US$/t)</b>", cell_style),
         ]
         data_ins = [headers_ins]
-        for insumo in insumos_selecionados:
+        for item in detalhes_insumos:
             data_ins.append([
-                Paragraph(sanitizar_texto_pdf(insumo['Insumo']), cell_style),
-                Paragraph(f"{insumo['Preco_usd_ton']:.2f}", cell_style)
+                Paragraph(sanitizar_texto_pdf(item['Insumo']), cell_style),
+                Paragraph(item['Quantidade_aplicada'], cell_style),
+                Paragraph(f"{item['Preco_base_usd']:.2f}", cell_style),
+                Paragraph(f"{item['Custo_lote_usd']:.2f}", cell_style),
+                Paragraph(f"{item['Custo_ton_usd']:.2f}", cell_style),
             ])
         
-        t_ins = Table(data_ins, colWidths=[250, 150])
+        t_ins = Table(data_ins, colWidths=[200, 110, 110, 110, 110])
         t_ins.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#40916c')),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
@@ -829,13 +870,23 @@ with tab_sistema:
 
         st.subheader("Insumos de Produção")
         insumos_sel = []
+        unidades_embalagem = max(1, math.ceil(massa_ton))
+
         for idx, row in df_insumos.iterrows():
-            if st.checkbox(f"Usar {row['Insumo']} (US$ {row['Preco_usd_ton']:.2f}/t)", key=f"ins_s_{idx}"):
+            rotulo = f"Usar {row['Insumo']}"
+            if eh_insumo_discreto(row['Insumo']):
+                rotulo += f" (US$ {row['Preco_usd_ton']:.2f}/unidade — lote exigirá {unidades_embalagem} un)"
+            else:
+                rotulo += f" (US$ {row['Preco_usd_ton']:.2f}/t proporcional)"
+
+            if st.checkbox(rotulo, key=f"ins_s_{idx}"):
                 insumos_sel.append(row)
 
         custo_mat_usd_t = res_s["Custo_total"].sum() / massa_ton
-        custo_ins_usd_t = sum(r["Preco_usd_ton"] for r in insumos_sel) if insumos_sel else 0.0
+        custo_ins_usd_t, custo_ins_usd_lote, detalhes_insumos_s = calcular_custos_insumos(insumos_sel, massa_ton)
         custo_tot_usd_t = custo_mat_usd_t + custo_ins_usd_t
+        custo_mat_usd_lote = res_s["Custo_total"].sum()
+        custo_tot_usd_lote = custo_mat_usd_lote + custo_ins_usd_lote
 
         resumo_econ = pd.DataFrame([
             {"Indicador": "Massa final resultante (kg)", "Valor": f"{massa_tot:.2f}"},
@@ -843,8 +894,8 @@ with tab_sistema:
             {"Indicador": "Custo insumos (US$/t)", "Valor": f"{custo_ins_usd_t:.2f}"},
             {"Indicador": "Custo total (US$/t)", "Valor": f"{custo_tot_usd_t:.2f}"},
             {"Indicador": "Custo total (R$/t)", "Valor": f"{(custo_tot_usd_t * cotacao_efetiva):.2f}"},
-            {"Indicador": "Custo total do lote (US$)", "Valor": f"{(custo_tot_usd_t * massa_ton):.2f}"},
-            {"Indicador": "Custo total do lote (R$)", "Valor": f"{(custo_tot_usd_t * massa_ton * cotacao_efetiva):.2f}"},
+            {"Indicador": "Custo total do lote (US$)", "Valor": f"{custo_tot_usd_lote:.2f}"},
+            {"Indicador": "Custo total do lote (R$)", "Valor": f"{(custo_tot_usd_lote * cotacao_efetiva):.2f}"},
         ])
         st.table(resumo_econ)
 
@@ -856,7 +907,7 @@ with tab_sistema:
         with col_dl1:
             st.download_button("Baixar CSV (Sistema)", data=mostrar.to_csv(index=False).encode("utf-8"), file_name="resultado_sistema.csv", mime="text/csv")
         with col_dl2:
-            pdf_bytes = gerar_pdf_a4_paisagem(mostrar, resumo_econ, resumo_nut, insumos_sel, tipo_origem="Sugestão do Sistema")
+            pdf_bytes = gerar_pdf_a4_paisagem(mostrar, resumo_econ, resumo_nut, detalhes_insumos_s, tipo_origem="Sugestão do Sistema")
             st.download_button("Baixar PDF A4 Paisagem (Sistema)", data=pdf_bytes, file_name="resultado_sistema.pdf", mime="application/pdf")
 
         st.markdown("---")
@@ -947,13 +998,23 @@ with tab_usuario:
 
         st.subheader("Insumos de Produção")
         insumos_sel_u = []
+        unidades_embalagem_u = max(1, math.ceil(massa_ton_u))
+
         for idx, row in df_insumos.iterrows():
-            if st.checkbox(f"Usar {row['Insumo']} (US$ {row['Preco_usd_ton']:.2f}/t)", key=f"ins_u_{idx}"):
+            rotulo_u = f"Usar {row['Insumo']}"
+            if eh_insumo_discreto(row['Insumo']):
+                rotulo_u += f" (US$ {row['Preco_usd_ton']:.2f}/unidade — lote exigirá {unidades_embalagem_u} un)"
+            else:
+                rotulo_u += f" (US$ {row['Preco_usd_ton']:.2f}/t proporcional)"
+
+            if st.checkbox(rotulo_u, key=f"ins_u_{idx}"):
                 insumos_sel_u.append(row)
 
         custo_mat_u = res_u["Custo_total"].sum() / massa_ton_u
-        custo_ins_u = sum(r["Preco_usd_ton"] for r in insumos_sel_u) if insumos_sel_u else 0.0
+        custo_ins_u, custo_ins_usd_lote_u, detalhes_insumos_u = calcular_custos_insumos(insumos_sel_u, massa_ton_u)
         custo_tot_u = custo_mat_u + custo_ins_u
+        custo_mat_usd_lote_u = res_u["Custo_total"].sum()
+        custo_tot_usd_lote_u = custo_mat_usd_lote_u + custo_ins_usd_lote_u
 
         resumo_econ_u = pd.DataFrame([
             {"Indicador": "Massa final resultante (kg)", "Valor": f"{massa_tot_u:.2f}"},
@@ -961,8 +1022,8 @@ with tab_usuario:
             {"Indicador": "Custo insumos (US$/t)", "Valor": f"{custo_ins_u:.2f}"},
             {"Indicador": "Custo total (US$/t)", "Valor": f"{custo_tot_u:.2f}"},
             {"Indicador": "Custo total (R$/t)", "Valor": f"{(custo_tot_u * cotacao_efetiva):.2f}"},
-            {"Indicador": "Custo total do lote (US$)", "Valor": f"{(custo_tot_u * massa_ton_u):.2f}"},
-            {"Indicador": "Custo total do lote (R$)", "Valor": f"{(custo_tot_u * massa_ton_u * cotacao_efetiva):.2f}"},
+            {"Indicador": "Custo total do lote (US$)", "Valor": f"{custo_tot_usd_lote_u:.2f}"},
+            {"Indicador": "Custo total do lote (R$)", "Valor": f"{(custo_tot_usd_lote_u * cotacao_efetiva):.2f}"},
         ])
         st.table(resumo_econ_u)
 
@@ -974,7 +1035,7 @@ with tab_usuario:
         with col_dl1_u:
             st.download_button("Baixar CSV (Usuário)", data=mostrar_u.to_csv(index=False).encode("utf-8"), file_name="resultado_usuario.csv", mime="text/csv")
         with col_dl2_u:
-            pdf_bytes_u = gerar_pdf_a4_paisagem(mostrar_u, resumo_econ_u, resumo_nut_u, insumos_sel_u, tipo_origem="Sugestão do Usuário")
+            pdf_bytes_u = gerar_pdf_a4_paisagem(mostrar_u, resumo_econ_u, resumo_nut_u, detalhes_insumos_u, tipo_origem="Sugestão do Usuário")
             st.download_button("Baixar PDF A4 Paisagem (Usuário)", data=pdf_bytes_u, file_name="resultado_usuario.pdf", mime="application/pdf")
 
         st.markdown("---")
