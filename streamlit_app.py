@@ -30,7 +30,6 @@ from reportlab.pdfgen import canvas
 
 st.set_page_config(page_title="Otimizador de Misturas NPK+C", layout="wide")
 
-# Localização resiliente da logomarca
 POSSIVEIS_CAMINHOS = [
     "PHFertilizer/innovaterra - logomarca modificada por PH.png",
     "innovaterra - logomarca modificada por PH.png",
@@ -39,15 +38,19 @@ POSSIVEIS_CAMINHOS = [
 ]
 
 def obter_bytes_logo():
-    """Lê a logomarca diretamente em memória para garantir compatibilidade total no PDF"""
+    """Converte e sanitiza a logomarca via Pillow para garantir compatibilidade com ReportLab"""
     for caminho in POSSIVEIS_CAMINHOS:
         if os.path.exists(caminho):
             try:
-                with open(caminho, "rb") as f:
-                    img_bytes = f.read()
-                # Valida se a imagem abre corretamente com Pillow
-                pil_img = PILImage.open(io.BytesIO(img_bytes))
-                return img_bytes, caminho
+                pil_img = PILImage.open(caminho)
+                # Converte RGBA para garantir integridade do canal alfa no PDF
+                if pil_img.mode not in ('RGB', 'RGBA'):
+                    pil_img = pil_img.convert('RGBA')
+                
+                buffer_out = io.BytesIO()
+                pil_img.save(buffer_out, format="PNG")
+                buffer_out.seek(0)
+                return buffer_out.getvalue(), caminho
             except Exception:
                 continue
     return None, None
@@ -108,7 +111,6 @@ def gs_csv_url(sheet_id: str, sheet_name: str) -> str:
 
 
 def eh_bioclastico(nome: str) -> bool:
-    """Identifica se o nome da matéria-prima refere-se ao Bioclástico"""
     return "biocl" in str(nome).lower()
 
 
@@ -467,7 +469,7 @@ def resumo_nutrientes_completo(df_resultado: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------
-# Exportação PDF com Leitura Segura de Imagem via BytesIO
+# Exportação PDF (ReportLab - A4 Paisagem)
 # --------------------------------------------------------
 
 class NumberedCanvas(canvas.Canvas):
@@ -492,7 +494,13 @@ class NumberedCanvas(canvas.Canvas):
         self.drawRightString(self._pagesize[0] - 30, 20, f"Página {self._pageNumber} / {page_count}")
 
 
-def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.DataFrame, df_nutrientes: pd.DataFrame, insumos_selecionados: list) -> bytes:
+def gerar_pdf_a4_paisagem(
+    df_ingredientes: pd.DataFrame,
+    df_resumo_econ: pd.DataFrame,
+    df_nutrientes: pd.DataFrame,
+    insumos_selecionados: list,
+    tipo_origem: str = "Sugestão do Sistema"
+) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -506,17 +514,17 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
     title_style = ParagraphStyle(
         'DocTitle',
         parent=styles['Heading1'],
-        fontSize=18,
+        fontSize=17,
         textColor=colors.HexColor('#1b4332'),
         alignment=0,
-        spaceAfter=4
+        spaceAfter=2
     )
     subtitle_style = ParagraphStyle(
         'DocSubTitle',
         parent=styles['Heading2'],
         fontSize=12,
         textColor=colors.HexColor('#2d6a4f'),
-        spaceBefore=15,
+        spaceBefore=14,
         spaceAfter=5
     )
     cell_style = ParagraphStyle(
@@ -531,26 +539,30 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
 
     story = []
 
-    # Inclusão da logo via Stream de Bytes (Pillow Buffer)
+    # Inclusão da logo via Stream de Bytes sem perda
+    img_element = None
     if LOGO_BYTES:
         try:
-            img_buffer = io.BytesIO(LOGO_BYTES)
-            img_logo = RLImage(img_buffer, width=150, height=55, preserveAspectRatio=True)
-            text_block = [
-                Paragraph("<b>INNOVATERRA AGRISOLUTIONS</b>", title_style),
-                Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Normal'])
-            ]
-            header_table = Table([[img_logo, text_block]], colWidths=[160, 620])
-            header_table.setStyle(TableStyle([
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ]))
-            story.append(header_table)
+            img_io = io.BytesIO(LOGO_BYTES)
+            img_io.seek(0)
+            img_element = RLImage(img_io, width=140, height=50)
         except Exception:
-            story.append(Paragraph("INNOVATERRA AGRISOLUTIONS", title_style))
-            story.append(Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Heading3']))
+            img_element = None
+
+    text_block = [
+        Paragraph("<b>INNOVATERRA AGRISOLUTIONS</b>", title_style),
+        Paragraph(f"<b>Relatório de Otimização de Fertilizante — Modalidade: {tipo_origem}</b>", styles['Normal'])
+    ]
+
+    if img_element:
+        header_table = Table([[img_element, text_block]], colWidths=[150, 630])
+        header_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        story.append(header_table)
     else:
         story.append(Paragraph("INNOVATERRA AGRISOLUTIONS", title_style))
-        story.append(Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Heading3']))
+        story.append(Paragraph(f"Relatório de Otimização de Fertilizante — Modalidade: {tipo_origem}", styles['Heading3']))
 
     story.append(Spacer(1, 10))
     story.append(Paragraph("Composição das Matérias-Primas", subtitle_style))
@@ -650,7 +662,6 @@ if "removidos" not in st.session_state:
 # Interface Principal e Barra Lateral
 # --------------------------------------------------------
 
-# Cabeçalho Principal com Logo
 if LOGO_BYTES:
     col_logo, col_tit = st.columns([1.5, 6])
     with col_logo:
@@ -662,7 +673,6 @@ else:
     st.title("Otimizador de Misturas NPK + Carbono")
     st.markdown("**INNOVATERRA AGRISOLUTIONS**")
 
-# Barra Lateral (Sidebar)
 if LOGO_BYTES:
     st.sidebar.image(LOGO_BYTES, use_container_width=True)
 st.sidebar.header("INNOVATERRA AGRISOLUTIONS")
@@ -846,7 +856,7 @@ with tab_sistema:
         with col_dl1:
             st.download_button("Baixar CSV (Sistema)", data=mostrar.to_csv(index=False).encode("utf-8"), file_name="resultado_sistema.csv", mime="text/csv")
         with col_dl2:
-            pdf_bytes = gerar_pdf_a4_paisagem(mostrar, resumo_econ, resumo_nut, insumos_sel)
+            pdf_bytes = gerar_pdf_a4_paisagem(mostrar, resumo_econ, resumo_nut, insumos_sel, tipo_origem="Sugestão do Sistema")
             st.download_button("Baixar PDF A4 Paisagem (Sistema)", data=pdf_bytes, file_name="resultado_sistema.pdf", mime="application/pdf")
 
         st.markdown("---")
@@ -964,7 +974,7 @@ with tab_usuario:
         with col_dl1_u:
             st.download_button("Baixar CSV (Usuário)", data=mostrar_u.to_csv(index=False).encode("utf-8"), file_name="resultado_usuario.csv", mime="text/csv")
         with col_dl2_u:
-            pdf_bytes_u = gerar_pdf_a4_paisagem(mostrar_u, resumo_econ_u, resumo_nut_u, insumos_sel_u)
+            pdf_bytes_u = gerar_pdf_a4_paisagem(mostrar_u, resumo_econ_u, resumo_nut_u, insumos_sel_u, tipo_origem="Sugestão do Usuário")
             st.download_button("Baixar PDF A4 Paisagem (Usuário)", data=pdf_bytes_u, file_name="resultado_usuario.pdf", mime="application/pdf")
 
         st.markdown("---")
