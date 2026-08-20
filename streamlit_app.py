@@ -20,7 +20,8 @@ from pulp import (
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import Image as RLImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image as RLImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle, KeepTogether
+from reportlab.pdfgen import canvas
 
 # --------------------------------------------------------
 # Configuração básica da página
@@ -454,8 +455,31 @@ def resumo_nutrientes_completo(df_resultado: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------
-# Exportação PDF (ReportLab - A4 Paisagem com Logomarca)
+# Exportação PDF (ReportLab - A4 Paisagem com Logomarca e Paginação)
 # --------------------------------------------------------
+
+class NumberedCanvas(canvas.Canvas):
+    """Canvas customizado para inserir numeração no formato Página X/Y"""
+    def __init__(self, *args, **kwargs):
+        canvas.Canvas.__init__(self, *args, **kwargs)
+        self._saved_page_states = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        num_pages = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self.draw_page_number(num_pages)
+            canvas.Canvas.showPage(self)
+        canvas.Canvas.save(self)
+
+    def draw_page_number(self, page_count):
+        self.setFont("Helvetica", 9)
+        # self._pagesize[0] representa a largura total da página paisagem
+        self.drawRightString(self._pagesize[0] - 30, 20, f"Página {self._pageNumber} / {page_count}")
 
 
 def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.DataFrame, df_nutrientes: pd.DataFrame) -> bytes:
@@ -482,8 +506,8 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
         parent=styles['Heading2'],
         fontSize=12,
         textColor=colors.HexColor('#2d6a4f'),
-        spaceBefore=8,
-        spaceAfter=4
+        spaceBefore=15,
+        spaceAfter=5
     )
     cell_style = ParagraphStyle(
         'CellText',
@@ -500,12 +524,13 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
     caminho_logo = obter_caminho_logo()
     if caminho_logo:
         try:
-            img_logo = RLImage(caminho_logo, width=110, height=45)
+            # preserveAspectRatio=True evita o corte e deformação da logo
+            img_logo = RLImage(caminho_logo, width=150, height=55, preserveAspectRatio=True)
             text_block = [
                 Paragraph("<b>INNOVATERRA AGRISOLUTIONS</b>", title_style),
                 Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Normal'])
             ]
-            header_table = Table([[img_logo, text_block]], colWidths=[120, 660])
+            header_table = Table([[img_logo, text_block]], colWidths=[160, 620])
             header_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ]))
@@ -534,10 +559,9 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
     ]))
     story.append(t_ing)
-    story.append(Spacer(1, 12))
+    story.append(Spacer(1, 5))
 
-    story.append(Paragraph("Resumo Econômico & Composição Nutricional Final", subtitle_style))
-    
+    # Tabela 2 e Tabela 3 agrupadas junto com o título
     headers_econ = [Paragraph(f"<b>{sanitizar_texto_pdf(c)}</b>", cell_style) for c in df_resumo_econ.columns]
     data_econ = [headers_econ]
     for row in df_resumo_econ.values:
@@ -563,9 +587,16 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
     ]))
 
     t_master = Table([[t_econ, t_nut]])
-    story.append(t_master)
+    
+    # KeepTogether previne que o título "Resumo..." fique solto na página 1 e as tabelas na página 2
+    resumo_elementos = [
+        Paragraph("Resumo Econômico & Composição Nutricional Final", subtitle_style),
+        t_master
+    ]
+    story.append(KeepTogether(resumo_elementos))
 
-    doc.build(story)
+    # Injeta a numeração ao montar o documento
+    doc.build(story, canvasmaker=NumberedCanvas)
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -587,11 +618,12 @@ if "removidos" not in st.session_state:
 
 caminho_logo = obter_caminho_logo()
 
-# Cabeçalho Principal com Logo
+# Cabeçalho Principal com Logo reajustado
 if caminho_logo:
-    col_logo, col_tit = st.columns([1, 6])
+    # Aumentado o peso da primeira coluna para evitar o corte e usar o container fluid
+    col_logo, col_tit = st.columns([1.5, 6])
     with col_logo:
-        st.image(caminho_logo, width=130)
+        st.image(caminho_logo, use_container_width=True)
     with col_tit:
         st.title("Otimizador de Misturas NPK + Carbono")
         st.markdown("**INNOVATERRA AGRISOLUTIONS**")
