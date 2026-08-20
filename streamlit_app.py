@@ -478,11 +478,10 @@ class NumberedCanvas(canvas.Canvas):
 
     def draw_page_number(self, page_count):
         self.setFont("Helvetica", 9)
-        # self._pagesize[0] representa a largura total da página paisagem
         self.drawRightString(self._pagesize[0] - 30, 20, f"Página {self._pageNumber} / {page_count}")
 
 
-def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.DataFrame, df_nutrientes: pd.DataFrame) -> bytes:
+def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.DataFrame, df_nutrientes: pd.DataFrame, insumos_selecionados: list) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -524,8 +523,9 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
     caminho_logo = obter_caminho_logo()
     if caminho_logo:
         try:
-            # preserveAspectRatio=True evita o corte e deformação da logo
-            img_logo = RLImage(caminho_logo, width=150, height=55, preserveAspectRatio=True)
+            # Força o caminho absoluto para o ReportLab não se perder na estrutura de diretórios
+            caminho_absoluto = os.path.abspath(caminho_logo)
+            img_logo = RLImage(caminho_absoluto, width=150, height=55, preserveAspectRatio=True)
             text_block = [
                 Paragraph("<b>INNOVATERRA AGRISOLUTIONS</b>", title_style),
                 Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Normal'])
@@ -559,6 +559,32 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
     ]))
     story.append(t_ing)
+
+    # Nova Tabela: Insumos de Produção Adicionais
+    if insumos_selecionados:
+        story.append(Spacer(1, 5))
+        story.append(Paragraph("Insumos de Produção Selecionados", subtitle_style))
+        headers_ins = [
+            Paragraph("<b>Insumo</b>", cell_style), 
+            Paragraph("<b>Custo Adicional (US$/t)</b>", cell_style)
+        ]
+        data_ins = [headers_ins]
+        for insumo in insumos_selecionados:
+            data_ins.append([
+                Paragraph(sanitizar_texto_pdf(insumo['Insumo']), cell_style),
+                Paragraph(f"{insumo['Preco_usd_ton']:.2f}", cell_style)
+            ])
+        
+        t_ins = Table(data_ins, colWidths=[250, 150])
+        t_ins.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#40916c')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 5),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ]))
+        story.append(t_ins)
+
     story.append(Spacer(1, 5))
 
     # Tabela 2 e Tabela 3 agrupadas junto com o título
@@ -588,7 +614,7 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
 
     t_master = Table([[t_econ, t_nut]])
     
-    # KeepTogether previne que o título "Resumo..." fique solto na página 1 e as tabelas na página 2
+    # KeepTogether previne que o título "Resumo..." fique solto
     resumo_elementos = [
         Paragraph("Resumo Econômico & Composição Nutricional Final", subtitle_style),
         t_master
@@ -618,9 +644,7 @@ if "removidos" not in st.session_state:
 
 caminho_logo = obter_caminho_logo()
 
-# Cabeçalho Principal com Logo reajustado
 if caminho_logo:
-    # Aumentado o peso da primeira coluna para evitar o corte e usar o container fluid
     col_logo, col_tit = st.columns([1.5, 6])
     with col_logo:
         st.image(caminho_logo, use_container_width=True)
@@ -631,7 +655,6 @@ else:
     st.title("Otimizador de Misturas NPK + Carbono")
     st.markdown("**INNOVATERRA AGRISOLUTIONS**")
 
-# Barra Lateral (Sidebar)
 if caminho_logo:
     st.sidebar.image(caminho_logo, use_container_width=True)
 st.sidebar.header("INNOVATERRA AGRISOLUTIONS")
@@ -815,7 +838,7 @@ with tab_sistema:
         with col_dl1:
             st.download_button("Baixar CSV (Sistema)", data=mostrar.to_csv(index=False).encode("utf-8"), file_name="resultado_sistema.csv", mime="text/csv")
         with col_dl2:
-            pdf_bytes = gerar_pdf_a4_paisagem(mostrar, resumo_econ, resumo_nut)
+            pdf_bytes = gerar_pdf_a4_paisagem(mostrar, resumo_econ, resumo_nut, insumos_sel)
             st.download_button("Baixar PDF A4 Paisagem (Sistema)", data=pdf_bytes, file_name="resultado_sistema.pdf", mime="application/pdf")
 
         st.markdown("---")
@@ -933,7 +956,7 @@ with tab_usuario:
         with col_dl1_u:
             st.download_button("Baixar CSV (Usuário)", data=mostrar_u.to_csv(index=False).encode("utf-8"), file_name="resultado_usuario.csv", mime="text/csv")
         with col_dl2_u:
-            pdf_bytes_u = gerar_pdf_a4_paisagem(mostrar_u, resumo_econ_u, resumo_nut_u)
+            pdf_bytes_u = gerar_pdf_a4_paisagem(mostrar_u, resumo_econ_u, resumo_nut_u, insumos_sel_u)
             st.download_button("Baixar PDF A4 Paisagem (Usuário)", data=pdf_bytes_u, file_name="resultado_usuario.pdf", mime="application/pdf")
 
         st.markdown("---")
