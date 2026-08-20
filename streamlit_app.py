@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
+from PIL import Image as PILImage
 from pulp import (
     LpMinimize,
     LpProblem,
@@ -29,18 +30,29 @@ from reportlab.pdfgen import canvas
 
 st.set_page_config(page_title="Otimizador de Misturas NPK+C", layout="wide")
 
-# Caminho exato da logomarca
-LOGO_PATH_PRINCIPAL = "PHFertilizer/innovaterra - logomarca modificada por PH.png"
-LOGO_PATH_ALTERNATIVO = "innovaterra - logomarca modificada por PH.png"
+# Localização resiliente da logomarca
+POSSIVEIS_CAMINHOS = [
+    "PHFertilizer/innovaterra - logomarca modificada por PH.png",
+    "innovaterra - logomarca modificada por PH.png",
+    "logo.png",
+    "PHFertilizer/logo.png"
+]
 
-def obter_caminho_logo() -> str | None:
-    if os.path.exists(LOGO_PATH_PRINCIPAL):
-        return LOGO_PATH_PRINCIPAL
-    if os.path.exists(LOGO_PATH_ALTERNATIVO):
-        return LOGO_PATH_ALTERNATIVO
-    return None
+def obter_bytes_logo():
+    """Lê a logomarca diretamente em memória para garantir compatibilidade total no PDF"""
+    for caminho in POSSIVEIS_CAMINHOS:
+        if os.path.exists(caminho):
+            try:
+                with open(caminho, "rb") as f:
+                    img_bytes = f.read()
+                # Valida se a imagem abre corretamente com Pillow
+                pil_img = PILImage.open(io.BytesIO(img_bytes))
+                return img_bytes, caminho
+            except Exception:
+                continue
+    return None, None
 
-LOGO_FILE = obter_caminho_logo()
+LOGO_BYTES, LOGO_PATH = obter_bytes_logo()
 
 # IDs das planilhas Google Sheets
 INSUMOS_SHEET_ID = "1rUIG49XF9eszt-4c_iS45bNLMEFlgpokVDG-qwFOF1k"
@@ -455,13 +467,12 @@ def resumo_nutrientes_completo(df_resultado: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------
-# Exportação PDF (ReportLab - A4 Paisagem com Logomarca e Paginação)
+# Exportação PDF com Leitura Segura de Imagem via BytesIO
 # --------------------------------------------------------
 
 class NumberedCanvas(canvas.Canvas):
-    """Canvas customizado para inserir numeração no formato Página X/Y"""
     def __init__(self, *args, **kwargs):
-        canvas.Canvas.__init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self._saved_page_states = []
 
     def showPage(self):
@@ -473,8 +484,8 @@ class NumberedCanvas(canvas.Canvas):
         for state in self._saved_page_states:
             self.__dict__.update(state)
             self.draw_page_number(num_pages)
-            canvas.Canvas.showPage(self)
-        canvas.Canvas.save(self)
+            super().showPage()
+        super().save()
 
     def draw_page_number(self, page_count):
         self.setFont("Helvetica", 9)
@@ -520,12 +531,11 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
 
     story = []
 
-    caminho_logo = obter_caminho_logo()
-    if caminho_logo:
+    # Inclusão da logo via Stream de Bytes (Pillow Buffer)
+    if LOGO_BYTES:
         try:
-            # Força o caminho absoluto para o ReportLab não se perder na estrutura de diretórios
-            caminho_absoluto = os.path.abspath(caminho_logo)
-            img_logo = RLImage(caminho_absoluto, width=150, height=55, preserveAspectRatio=True)
+            img_buffer = io.BytesIO(LOGO_BYTES)
+            img_logo = RLImage(img_buffer, width=150, height=55, preserveAspectRatio=True)
             text_block = [
                 Paragraph("<b>INNOVATERRA AGRISOLUTIONS</b>", title_style),
                 Paragraph("Relatório de Otimização e Formulação de Fertilizante", styles['Normal'])
@@ -560,7 +570,7 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
     ]))
     story.append(t_ing)
 
-    # Nova Tabela: Insumos de Produção Adicionais
+    # Insumos de Produção Selecionados
     if insumos_selecionados:
         story.append(Spacer(1, 5))
         story.append(Paragraph("Insumos de Produção Selecionados", subtitle_style))
@@ -587,7 +597,7 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
 
     story.append(Spacer(1, 5))
 
-    # Tabela 2 e Tabela 3 agrupadas junto com o título
+    # Resumo Econômico e Nutricional
     headers_econ = [Paragraph(f"<b>{sanitizar_texto_pdf(c)}</b>", cell_style) for c in df_resumo_econ.columns]
     data_econ = [headers_econ]
     for row in df_resumo_econ.values:
@@ -614,14 +624,12 @@ def gerar_pdf_a4_paisagem(df_ingredientes: pd.DataFrame, df_resumo_econ: pd.Data
 
     t_master = Table([[t_econ, t_nut]])
     
-    # KeepTogether previne que o título "Resumo..." fique solto
     resumo_elementos = [
         Paragraph("Resumo Econômico & Composição Nutricional Final", subtitle_style),
         t_master
     ]
     story.append(KeepTogether(resumo_elementos))
 
-    # Injeta a numeração ao montar o documento
     doc.build(story, canvasmaker=NumberedCanvas)
     buffer.seek(0)
     return buffer.getvalue()
@@ -642,12 +650,11 @@ if "removidos" not in st.session_state:
 # Interface Principal e Barra Lateral
 # --------------------------------------------------------
 
-caminho_logo = obter_caminho_logo()
-
-if caminho_logo:
+# Cabeçalho Principal com Logo
+if LOGO_BYTES:
     col_logo, col_tit = st.columns([1.5, 6])
     with col_logo:
-        st.image(caminho_logo, use_container_width=True)
+        st.image(LOGO_BYTES, use_container_width=True)
     with col_tit:
         st.title("Otimizador de Misturas NPK + Carbono")
         st.markdown("**INNOVATERRA AGRISOLUTIONS**")
@@ -655,8 +662,9 @@ else:
     st.title("Otimizador de Misturas NPK + Carbono")
     st.markdown("**INNOVATERRA AGRISOLUTIONS**")
 
-if caminho_logo:
-    st.sidebar.image(caminho_logo, use_container_width=True)
+# Barra Lateral (Sidebar)
+if LOGO_BYTES:
+    st.sidebar.image(LOGO_BYTES, use_container_width=True)
 st.sidebar.header("INNOVATERRA AGRISOLUTIONS")
 
 if st.sidebar.button("🔄 Recarregar Dados das Planilhas"):
