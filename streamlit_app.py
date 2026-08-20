@@ -80,6 +80,11 @@ def gs_csv_url(sheet_id: str, sheet_name: str) -> str:
     )
 
 
+def eh_bioclastico(nome: str) -> bool:
+    """Identifica se o nome da matéria-prima refere-se ao Bioclástico"""
+    return "biocl" in str(nome).lower()
+
+
 # --------------------------------------------------------
 # Carregamento dos dados via Google Sheets
 # --------------------------------------------------------
@@ -180,7 +185,6 @@ def carregar_mat_primas() -> pd.DataFrame:
     df["Tipo_funcao"] = df["Tipo_funcao"].astype(str).str.strip().str.upper()
     df = df[df["Ingrediente"] != ""].copy()
 
-    # Cálculo do Carbono derivado da Matéria Orgânica caso C_pct esteja zerado
     mask_c_zero = df["C_pct"].fillna(0).eq(0) & df["MO_ms_pct"].gt(0)
     df.loc[mask_c_zero, "C_pct"] = 0.58 * df.loc[mask_c_zero, "MO_ms_pct"] * (
         1 - df.loc[mask_c_zero, "Umidade_pct"] / 100.0
@@ -258,7 +262,7 @@ def obter_cotacao_usd_brl_api() -> float | None:
 
 
 # --------------------------------------------------------
-# Otimizador com Massa Mínima Flexível
+# Otimizador com Bioclástico e Massa Flexível
 # --------------------------------------------------------
 
 
@@ -271,12 +275,13 @@ def resolver_base_ativa(
     usar_bioclastico: bool,
     pct_bioclastico: float
 ):
+    # Considera quem tem nutrientes OU quem for o Bioclástico
     mask_contribuintes = (
         (ativos["N_pct"] > 0) |
         (ativos["P2O5_pct"] > 0) |
         (ativos["K2O_pct"] > 0) |
         (ativos["C_pct"] > 0) |
-        (ativos["Ingrediente"] == "Bioclástico")
+        (ativos["Ingrediente"].apply(eh_bioclastico))
     )
     ativos = ativos[mask_contribuintes].copy()
 
@@ -290,7 +295,6 @@ def resolver_base_ativa(
     
     x = {i: LpVariable(f"x_{i}", lowBound=0.0) for i in ativos.index}
 
-    # Variáveis de folga (Slacks) caso a fonte selecionada não possua o nutriente de forma alguma
     slack_nutrientes = {
         col: LpVariable(f"slack_{col}", lowBound=0.0)
         for col, alvo in metas_todas.items() if alvo > 0
@@ -304,12 +308,14 @@ def resolver_base_ativa(
 
     total_ativos = lpSum(x[i] for i in ativos.index)
 
-    # Bioclástico atrelado à proporção da massa
-    if usar_bioclastico and "Bioclástico" in ativos["Ingrediente"].values:
-        idx_bio = ativos[ativos["Ingrediente"] == "Bioclástico"].index[0]
-        prob += x[idx_bio] == (pct_bioclastico / 100.0) * total_ativos
+    # Identificação e trava da proporção exata do Bioclástico
+    if usar_bioclastico:
+        bio_indices = [i for i in ativos.index if eh_bioclastico(ativos.loc[i, "Ingrediente"])]
+        if bio_indices:
+            idx_bio = bio_indices[0]
+            # Bioclástico deve ser exatamente a fração informada da massa total calculada
+            prob += x[idx_bio] == (pct_bioclastico / 100.0) * total_ativos
 
-    # Atendimento das metas nutricionais com base na massa calculada
     for col, alvo in metas_todas.items():
         if alvo <= 0:
             continue
@@ -318,7 +324,6 @@ def resolver_base_ativa(
         minimo = max(0.0, alvo * (1 - fator_tol))
         contrib = lpSum(x[i] * float(ativos.loc[i, col]) / 100.0 for i in ativos.index)
         
-        # O nutriente deve suprir a meta sobre pelo menos a massa mínima exigida
         prob += contrib + (slack_nutrientes[col] / 100.0) * massa_minima >= (minimo / 100.0) * massa_minima
         
         if tol > 0:
@@ -364,7 +369,6 @@ def escolher_inerte(sol_ativos: pd.DataFrame, base: pd.DataFrame, matriz: pd.Dat
     massa_ativos = sol_ativos["Quantidade_kg"].sum()
     faltante = massa_minima - massa_ativos
 
-    # Se os ativos já atingiram ou ultrapassaram a massa mínima para fechar os nutrientes, não precisa de inerte
     if faltante <= 1e-6:
         return None, None, [], []
 
@@ -612,7 +616,6 @@ for i, col in enumerate(NUTRIENTES_ADICIONAIS):
             step=0.1,
         )
 
-# PARÂMETRO ATUALIZADO
 massa_minima = st.number_input(
     "Massa final mínima aproximada (kg)", min_value=1.0, value=1000.0, step=100.0
 )
@@ -648,7 +651,7 @@ with tab_sistema:
 
     ativos_sistema = df_mat[df_mat["Tipo_funcao"] != "INERTE"].copy()
     if permitir_bioclastico_sistema == "Não":
-        ativos_sistema = ativos_sistema[ativos_sistema["Ingrediente"] != "Bioclástico"].copy()
+        ativos_sistema = ativos_sistema[~ativos_sistema["Ingrediente"].apply(eh_bioclastico)].copy()
 
     if st.session_state.removidos["sistema"]:
         ativos_sistema = ativos_sistema[~ativos_sistema["Ingrediente"].isin(st.session_state.removidos["sistema"])].copy()
@@ -770,7 +773,7 @@ with tab_usuario:
 
     ativos_usuario = df_mat[df_mat["Ingrediente"].isin(ingredientes_usuario)].copy()
     if permitir_bioclastico_usuario == "Não":
-        ativos_usuario = ativos_usuario[ativos_usuario["Ingrediente"] != "Bioclástico"].copy()
+        ativos_usuario = ativos_usuario[~ativos_usuario["Ingrediente"].apply(eh_bioclastico)].copy()
 
     if st.session_state.removidos["usuario"]:
         ativos_usuario = ativos_usuario[~ativos_usuario["Ingrediente"].isin(st.session_state.removidos["usuario"])].copy()
