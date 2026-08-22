@@ -323,7 +323,7 @@ def obter_cotacao_usd_brl_api() -> float | None:
 
 
 # --------------------------------------------------------
-# Otimizador com Suporte Completo a Macros e Micros
+# Otimizador com Formulação Linearizada
 # --------------------------------------------------------
 
 
@@ -339,17 +339,14 @@ def resolver_base_ativa(
     metas_todas = metas_principais.copy()
     metas_todas.update(metas_extra)
 
-    # Identifica nutrientes com metas ativas (> 0)
     nutrientes_com_meta = [col for col, alvo in metas_todas.items() if alvo > 0]
 
-    # FILTRO CORRIGIDO: Aceita qualquer ingrediente que contribua com NENHUM ou QUALQUER nutriente solicitado
     def tem_contribuicao(row):
         if eh_bioclastico(row["Ingrediente"]):
             return True
         for col in nutrientes_com_meta:
             if float(row.get(col, 0.0)) > 0:
                 return True
-        # Mantém também quem fornece NPK ou C base
         for col in NUTRIENTES_PRINCIPAIS:
             if float(row.get(col, 0.0)) > 0:
                 return True
@@ -363,20 +360,19 @@ def resolver_base_ativa(
     prob = LpProblem("Mistura_NPK_C_Ativos", LpMinimize)
     x = {i: LpVariable(f"x_{i}", lowBound=0.0) for i in ativos.index}
 
-    # Variáveis de Folga (Slacks)
+    # Variáveis de Folga em KG absolutos (Mantém a equação 100% Linear)
     slack_nutrientes = {
         col: LpVariable(f"slack_{col}", lowBound=0.0)
         for col in nutrientes_com_meta
     }
 
-    PENALIDADE_SLACK = 1e6
+    PENALIDADE_SLACK = 1e5
     prob += (
         lpSum(x[i] * float(ativos.loc[i, "Preco_ton"]) / 1000.0 for i in ativos.index) +
         lpSum(slack_nutrientes[col] * PENALIDADE_SLACK for col in slack_nutrientes)
     )
 
     total_ativos = lpSum(x[i] for i in ativos.index)
-    # A massa total de ativos deve atender ao menos à massa mínima requerida
     prob += total_ativos >= massa_minima
 
     if usar_bioclastico:
@@ -385,29 +381,39 @@ def resolver_base_ativa(
             idx_bio = bio_indices[0]
             prob += x[idx_bio] == (pct_bioclastico / 100.0) * total_ativos
 
-    # Restrições Nutricionais
+    # Restrições Nutricionais Linearizadas
     for col in nutrientes_com_meta:
         alvo = metas_todas[col]
         fator_tol = tol / 100.0
         minimo = max(0.0, alvo * (1 - fator_tol))
         
-        contrib = lpSum(x[i] * float(ativos.loc[i, col]) / 100.0 for i in ativos.index)
-        
-        # Garante o teor com base na massa de ativos em formulação
-        prob += contrib + (slack_nutrientes[col] / 100.0) * total_ativos >= (minimo / 100.0) * total_ativos
+        # contrib_liquida >= 0
+        prob += (
+            lpSum(x[i] * (float(ativos.loc[i, col]) - minimo) / 100.0 for i in ativos.index) +
+            slack_nutrientes[col] >= 0
+        )
         
         if tol > 0:
             maximo = alvo * (1 + fator_tol)
-            prob += contrib <= (maximo / 100.0) * total_ativos
+            prob += (
+                lpSum(x[i] * (float(ativos.loc[i, col]) - maximo) / 100.0 for i in ativos.index) <= 0
+            )
 
     prob.solve(PULP_CBC_CMD(msg=False))
     status = LpStatus[prob.status]
 
+    if status != "Optimal":
+        return None, f"Modelo de otimização sem solução. Status: {status}", None
+
+    total_kg_calc = sum(value(x[i]) for i in ativos.index)
+    
+    # Checar se houve déficit real
     deficits = {}
     for col, var in slack_nutrientes.items():
         v = value(var)
         if v is not None and v > 1e-4:
-            deficits[ROTULOS.get(col, col)] = round(v, 3)
+            pct_faltante = (v / total_kg_calc) * 100.0 if total_kg_calc > 0 else 0.0
+            deficits[ROTULOS.get(col, col)] = round(pct_faltante, 3)
 
     if deficits:
         msg_diag = (
@@ -417,9 +423,6 @@ def resolver_base_ativa(
         for nut, d_val in deficits.items():
             msg_diag += f"- **{nut}**: Falta incorporar **{d_val}%**.\n"
         return None, msg_diag, None
-
-    if status != "Optimal":
-        return None, f"Modelo de otimização sem solução. Status: {status}", None
 
     sol = ativos.copy()
     sol["Quantidade_kg"] = [value(x[i]) for i in ativos.index]
@@ -625,7 +628,6 @@ def gerar_pdf_a4_paisagem(
     ]))
     story.append(t_ing)
 
-    # Insumos de Produção Selecionados
     if detalhes_insumos:
         story.append(Spacer(1, 5))
         story.append(Paragraph("Insumos de Produção Selecionados", subtitle_style))
@@ -658,7 +660,6 @@ def gerar_pdf_a4_paisagem(
 
     story.append(Spacer(1, 5))
 
-    # Resumo Econômico e Nutricional
     headers_econ = [Paragraph(f"<b>{sanitizar_texto_pdf(c)}</b>", cell_style) for c in df_resumo_econ.columns]
     data_econ = [headers_econ]
     for row in df_resumo_econ.values:
@@ -1028,7 +1029,7 @@ with tab_usuario:
         resumo_econ_u = pd.DataFrame([
             {"Indicador": "Massa final resultante (kg)", "Valor": f"{massa_tot_u:.2f}"},
             {"Indicador": "Custo matérias-primas (US$/t)", "Valor": f"{custo_mat_u:.2f}"},
-            {"Indicador": "Custo insumos (US$/t)", "Valor": f"{custo_ins_u:.2f}"},
+            {"Indicador": "Custo insumos (US$/t)", "Valor": f"{custo_ins_usd_t:.2f}" if 'custo_ins_usd_t' in locals() else f"{custo_ins_u:.2f}"},
             {"Indicador": "Custo total (US$/t)", "Valor": f"{custo_tot_u:.2f}"},
             {"Indicador": "Custo total (R$/t)", "Valor": f"{(custo_tot_u * cotacao_efetiva):.2f}"},
             {"Indicador": "Custo total do lote (US$)", "Valor": f"{custo_tot_usd_lote_u:.2f}"},
