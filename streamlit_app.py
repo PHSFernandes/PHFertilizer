@@ -115,17 +115,13 @@ def eh_bioclastico(nome: str) -> bool:
 
 
 def eh_insumo_discreto(nome_insumo: str) -> bool:
-    """Identifica se o insumo precisa ser arredondado para cima em unidades inteiras (ex: Big Bag, Pallet)"""
     n = str(nome_insumo).lower()
     return "big bag" in n or "bigbag" in n or "pallet" in n or "palete" in n
 
 
 def calcular_custos_insumos(insumos_selecionados: list, massa_ton: float):
-    """Calcula custos totais e unitários respeitando arredondamento de Pallets e Big Bags"""
     custo_total_lote_usd = 0.0
     detalhes_insumos = []
-    
-    # 1 Big Bag e 1 Pallet comportam até 1 tonelada (1000 kg)
     unidades_inteiras = max(1, math.ceil(massa_ton))
 
     for item in insumos_selecionados:
@@ -327,7 +323,7 @@ def obter_cotacao_usd_brl_api() -> float | None:
 
 
 # --------------------------------------------------------
-# Otimizador com Bioclástico e Massa Flexível
+# Otimizador com Suporte Completo a Macros e Micros
 # --------------------------------------------------------
 
 
@@ -340,28 +336,37 @@ def resolver_base_ativa(
     usar_bioclastico: bool,
     pct_bioclastico: float
 ):
-    mask_contribuintes = (
-        (ativos["N_pct"] > 0) |
-        (ativos["P2O5_pct"] > 0) |
-        (ativos["K2O_pct"] > 0) |
-        (ativos["C_pct"] > 0) |
-        (ativos["Ingrediente"].apply(eh_bioclastico))
-    )
-    ativos = ativos[mask_contribuintes].copy()
-
-    if ativos.empty:
-        return None, "Nenhuma matéria-prima disponível no momento possui teor para suprir N, P₂O₅, K₂O ou Carbono.", None
-
     metas_todas = metas_principais.copy()
     metas_todas.update(metas_extra)
 
+    # Identifica nutrientes com metas ativas (> 0)
+    nutrientes_com_meta = [col for col, alvo in metas_todas.items() if alvo > 0]
+
+    # FILTRO CORRIGIDO: Aceita qualquer ingrediente que contribua com NENHUM ou QUALQUER nutriente solicitado
+    def tem_contribuicao(row):
+        if eh_bioclastico(row["Ingrediente"]):
+            return True
+        for col in nutrientes_com_meta:
+            if float(row.get(col, 0.0)) > 0:
+                return True
+        # Mantém também quem fornece NPK ou C base
+        for col in NUTRIENTES_PRINCIPAIS:
+            if float(row.get(col, 0.0)) > 0:
+                return True
+        return False
+
+    ativos = ativos[ativos.apply(tem_contribuicao, axis=1)].copy()
+
+    if ativos.empty:
+        return None, "Nenhuma matéria-prima disponível no momento possui teores para suprir os nutrientes selecionados.", None
+
     prob = LpProblem("Mistura_NPK_C_Ativos", LpMinimize)
-    
     x = {i: LpVariable(f"x_{i}", lowBound=0.0) for i in ativos.index}
 
+    # Variáveis de Folga (Slacks)
     slack_nutrientes = {
         col: LpVariable(f"slack_{col}", lowBound=0.0)
-        for col, alvo in metas_todas.items() if alvo > 0
+        for col in nutrientes_com_meta
     }
 
     PENALIDADE_SLACK = 1e6
@@ -371,6 +376,8 @@ def resolver_base_ativa(
     )
 
     total_ativos = lpSum(x[i] for i in ativos.index)
+    # A massa total de ativos deve atender ao menos à massa mínima requerida
+    prob += total_ativos >= massa_minima
 
     if usar_bioclastico:
         bio_indices = [i for i in ativos.index if eh_bioclastico(ativos.loc[i, "Ingrediente"])]
@@ -378,15 +385,16 @@ def resolver_base_ativa(
             idx_bio = bio_indices[0]
             prob += x[idx_bio] == (pct_bioclastico / 100.0) * total_ativos
 
-    for col, alvo in metas_todas.items():
-        if alvo <= 0:
-            continue
-        
+    # Restrições Nutricionais
+    for col in nutrientes_com_meta:
+        alvo = metas_todas[col]
         fator_tol = tol / 100.0
         minimo = max(0.0, alvo * (1 - fator_tol))
+        
         contrib = lpSum(x[i] * float(ativos.loc[i, col]) / 100.0 for i in ativos.index)
         
-        prob += contrib + (slack_nutrientes[col] / 100.0) * massa_minima >= (minimo / 100.0) * massa_minima
+        # Garante o teor com base na massa de ativos em formulação
+        prob += contrib + (slack_nutrientes[col] / 100.0) * total_ativos >= (minimo / 100.0) * total_ativos
         
         if tol > 0:
             maximo = alvo * (1 + fator_tol)
@@ -399,7 +407,7 @@ def resolver_base_ativa(
     for col, var in slack_nutrientes.items():
         v = value(var)
         if v is not None and v > 1e-4:
-            deficits[ROTULOS.get(col, col)] = round(v, 2)
+            deficits[ROTULOS.get(col, col)] = round(v, 3)
 
     if deficits:
         msg_diag = (
@@ -498,7 +506,7 @@ def resumo_nutrientes_completo(df_resultado: pd.DataFrame) -> pd.DataFrame:
             linhas.append(
                 {
                     "Nutriente": ROTULOS.get(col, col),
-                    "Teor final (%)": round(teor_final, 2),
+                    "Teor final (%)": round(teor_final, 3),
                 }
             )
     return pd.DataFrame(linhas)
@@ -617,7 +625,7 @@ def gerar_pdf_a4_paisagem(
     ]))
     story.append(t_ing)
 
-    # Insumos de Produção com detalhamento de embalagens arredondadas
+    # Insumos de Produção Selecionados
     if detalhes_insumos:
         story.append(Spacer(1, 5))
         story.append(Paragraph("Insumos de Produção Selecionados", subtitle_style))
@@ -770,7 +778,8 @@ for i, col in enumerate(NUTRIENTES_ADICIONAIS):
             ROTULOS[col],
             min_value=0.0,
             value=0.0,
-            step=0.1,
+            step=0.01 if col in ["Ni_pct", "Mo_pct"] else 0.1,
+            format="%.3f" if col in ["Ni_pct", "Mo_pct"] else "%.2f"
         )
 
 massa_minima = st.number_input(
