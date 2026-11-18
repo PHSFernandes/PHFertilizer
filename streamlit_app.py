@@ -597,7 +597,121 @@ if modo_formulacao == "1. Fórmula Direta (%)":
             with col_dl2: st.download_button("Baixar PDF", data=gerar_pdf_a4_paisagem(mostrar, resumo_econ, resumo_nut, detalhes_insumos_s, f"Fórmula Direta - {estado_fisico}"), file_name="resultado.pdf", mime="application/pdf")
 
     with tab_usuario:
-        st.info("A funcionalidade Restrição de Estoque opera na mesma lógica. Siga o fluxo na aba 'Sugestão do Sistema'.")
+        st.subheader("Sugestão do Usuário (Restrição de Estoque)")
+
+        options_estoque = df_mat[df_mat["Tipo_funcao"] != "INERTE"]["Ingrediente"].unique().tolist()
+        ingredientes_usuario = st.multiselect("Selecione as matérias-primas disponíveis no estoque:", options=options_estoque, default=options_estoque, key="ing_u")
+
+        col_bio_u1, col_bio_u2 = st.columns([1, 2])
+        with col_bio_u1:
+            permitir_bioclastico_usuario = st.radio("Permitir Bioclástico?", ["Não", "Sim"], key="bio_u", horizontal=True)
+        with col_bio_u2:
+            pct_bioclastico_u = 0.0
+            if permitir_bioclastico_usuario == "Sim":
+                pct_bioclastico_u = st.number_input(
+                    "Percentual (%)",
+                    min_value=0.1, max_value=100.0, value=5.0, step=0.5, key="pct_bio_u"
+                )
+
+        ativos_usuario = df_mat[df_mat["Ingrediente"].isin(ingredientes_usuario)].copy()
+        if permitir_bioclastico_usuario == "Não":
+            ativos_usuario = ativos_usuario[~ativos_usuario["Ingrediente"].apply(eh_bioclastico)].copy()
+
+        if st.session_state.removidos["usuario"]:
+            ativos_usuario = ativos_usuario[~ativos_usuario["Ingrediente"].isin(st.session_state.removidos["usuario"])].copy()
+
+        st.markdown("### Ingredientes Disponíveis (Usuário)")
+        st.dataframe(ativos_usuario[["Ingrediente", "Preco_ton", "Umidade_pct", "MO_ms_pct", "C_pct", "N_pct", "P2O5_pct", "K2O_pct"]], use_container_width=True, hide_index=True)
+
+        selecionados_u = ativos_usuario["Ingrediente"].tolist()
+        incompat_u, limitados_u = classificar_compatibilidade(selecionados_u, df_compat)
+
+        if incompat_u:
+            st.warning("1º Passo: Combinações INCOMPATÍVEIS detectadas no estoque. Escolha a matéria-prima a remover em cada par:")
+            rem_temp_u = set()
+            for idx, (a, b) in enumerate(incompat_u):
+                esc = st.radio(f"Par: {a} × {b}", [f"Remover {a}", f"Remover {b}"], key=f"usu_inc_{idx}")
+                rem_temp_u.add(a if esc == f"Remover {a}" else b)
+            if st.button("Aplicar Remoções (Usuário)"):
+                st.session_state.removidos["usuario"].update(rem_temp_u)
+                st.rerun()
+
+        if st.button("Calcular Mistura (Usuário)", type="primary", disabled=bool(incompat_u)):
+            metas_principais_u = {"C_pct": meta_c, "N_pct": meta_n, "P2O5_pct": meta_p, "K2O_pct": meta_k}
+            
+            sol_ativos_u, status_msg_u, info_u = resolver_base_ativa(
+                ativos_usuario, metas_principais_u, meta_adicionais, tolerancia, massa_minima,
+                (permitir_bioclastico_usuario == "Sim"), pct_bioclastico_u
+            )
+
+            if sol_ativos_u is None:
+                st.warning(status_msg_u)
+                st.session_state.calc_results["usuario"] = None
+            else:
+                inerte_u, _, _, lim_inertes_u = escolher_inerte(sol_ativos_u, df_mat, df_compat, massa_minima)
+                if inerte_u is None and lim_inertes_u:
+                    inerte_u = lim_inertes_u[0][0]
+
+                frames_u = [sol_ativos_u.copy()]
+                if inerte_u is not None:
+                    frames_u.append(pd.DataFrame([inerte_u]))
+                res_u = pd.concat(frames_u, ignore_index=True)
+                st.session_state.calc_results["usuario"] = res_u
+
+        res_u = st.session_state.calc_results["usuario"]
+        if res_u is not None:
+            massa_tot_u = res_u["Quantidade_kg"].sum()
+            massa_ton_u = massa_tot_u / 1000.0
+            res_u["Participacao_pct"] = round(100 * res_u["Quantidade_kg"] / massa_tot_u, 2)
+            res_u["Custo_total"] = round(res_u["Quantidade_kg"] * res_u["Preco_ton"] / 1000.0, 2)
+
+            st.success(f"Solução ótima calculada com sucesso! Massa total do lote: **{massa_tot_u:.2f} kg**")
+
+            st.subheader("Ingredientes Selecionados")
+            mostrar_u = res_u[["Ingrediente", "Quantidade_kg", "Participacao_pct", "Preco_ton", "Custo_total"]].sort_values("Quantidade_kg", ascending=False)
+            st.dataframe(mostrar_u, use_container_width=True, hide_index=True)
+
+            st.subheader("Insumos de Produção")
+            insumos_sel_u = []
+            unidades_embalagem_u = max(1, math.ceil(massa_ton_u))
+
+            for idx, row in df_insumos.iterrows():
+                rotulo_u = f"Usar {row['Insumo']}"
+                if eh_insumo_discreto(row['Insumo']):
+                    rotulo_u += f" (US$ {row['Preco_usd_ton']:.2f}/unidade — lote exigirá {unidades_embalagem_u} un)"
+                else:
+                    rotulo_u += f" (US$ {row['Preco_usd_ton']:.2f}/t proporcional)"
+
+                if st.checkbox(rotulo_u, key=f"ins_u_{idx}"):
+                    insumos_sel_u.append(row)
+
+            custo_mat_u = res_u["Custo_total"].sum() / massa_ton_u
+            custo_ins_u, custo_ins_usd_lote_u, detalhes_insumos_u = calcular_custos_insumos(insumos_sel_u, massa_ton_u)
+            custo_tot_u = custo_mat_u + custo_ins_u
+            custo_mat_usd_lote_u = res_u["Custo_total"].sum()
+            custo_tot_usd_lote_u = custo_mat_usd_lote_u + custo_ins_usd_lote_u
+
+            resumo_econ_u = pd.DataFrame([
+                {"Indicador": "Massa final resultante (kg)", "Valor": f"{massa_tot_u:.2f}"},
+                {"Indicador": "Custo matérias-primas (US$/t)", "Valor": f"{custo_mat_u:.2f}"},
+                {"Indicador": "Custo insumos (US$/t)", "Valor": f"{custo_ins_u:.2f}"},
+                {"Indicador": "Custo total (US$/t)", "Valor": f"{custo_tot_u:.2f}"},
+                {"Indicador": "Custo total (R$/t)", "Valor": f"{(custo_tot_u * cotacao_efetiva):.2f}"},
+                {"Indicador": "Custo total do lote (US$)", "Valor": f"{custo_tot_usd_lote_u:.2f}"},
+                {"Indicador": "Custo total do lote (R$)", "Valor": f"{(custo_tot_usd_lote_u * cotacao_efetiva):.2f}"},
+            ])
+            st.table(resumo_econ_u)
+
+            resumo_nut_u = resumo_nutrientes_completo(res_u)
+            st.subheader("Composição Nutricional Final")
+            st.dataframe(resumo_nut_u, use_container_width=True, hide_index=True)
+
+            col_dl1_u, col_dl2_u = st.columns(2)
+            with col_dl1_u:
+                st.download_button("Baixar CSV", data=mostrar_u.to_csv(index=False).encode("utf-8"), file_name="resultado_usuario.csv", mime="text/csv")
+            with col_dl2_u:
+                pdf_bytes_u = gerar_pdf_a4_paisagem(mostrar_u, resumo_econ_u, resumo_nut_u, detalhes_insumos_u, tipo_origem=f"Seleção Manual - {estado_fisico}")
+                st.download_button("Baixar PDF", data=pdf_bytes_u, file_name="resultado_usuario.pdf", mime="application/pdf")
 
 elif modo_formulacao == "2. Recomendação (kg/ha)":
     st.title("Módulo: Recomendação Direta (kg/ha)")
